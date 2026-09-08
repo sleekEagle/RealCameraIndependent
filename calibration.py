@@ -36,8 +36,7 @@ def find_corners(gray, board_size):
         corners = cv2.cornerSubPix(gray, corners, (11, 11), (-1, -1), criteria)
     return found, corners
 
-
-def main():
+def square():
     left_dir = r'C:\Users\lahir\MODEST\Scene4\Scene4\EOS6D_B_Left\fl_28mm\calibration'
     right_dir = r'C:\Users\lahir\MODEST\Scene4\Scene4\EOS6D_A_Right\fl_28mm\calibration'
     debug_dir = r'C:\Users\lahir\MODEST\debug' # Optional folder for corner/rectification visualizations
