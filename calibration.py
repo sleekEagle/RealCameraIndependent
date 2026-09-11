@@ -16,11 +16,13 @@ Notes:
 
 import argparse
 import glob
+import json
 import os
 import sys
 
 import cv2
 import numpy as np
+import json
 
 
 def find_corners(gray, board_size):
@@ -36,16 +38,26 @@ def find_corners(gray, board_size):
         corners = cv2.cornerSubPix(gray, corners, (11, 11), (-1, -1), criteria)
     return found, corners
 
-def square():
-    left_dir = r'C:\Users\lahir\MODEST\Scene4\Scene4\EOS6D_B_Left\fl_28mm\calibration'
-    right_dir = r'C:\Users\lahir\MODEST\Scene4\Scene4\EOS6D_A_Right\fl_28mm\calibration'
-    debug_dir = r'C:\Users\lahir\MODEST\debug' # Optional folder for corner/rectification visualizations
-    out_dir = r'C:\Users\lahir\MODEST\calibrtion\scene4'
-    board_cols = 6 # Inner corners along board width
-    board_rows = 4 # Inner corners along board height
-    square_size = 0.06 # hysical size of one square (e.g. mm)
-    ext = 'JPG'
+def clear_dir(path):
+    """Delete all files directly inside path (subdirectories are left alone)."""
+    for name in os.listdir(path):
+        fp = os.path.join(path, name)
+        if os.path.isfile(fp):
+            os.remove(fp)
 
+def per_view_errors(objpoints, imgpoints, K, D, rvecs, tvecs):
+    errors = []
+    for i in range(len(objpoints)):
+        proj, _ = cv2.projectPoints(objpoints[i], rvecs[i], tvecs[i], K, D)
+        err = cv2.norm(imgpoints[i], proj, cv2.NORM_L2) / len(proj)
+        errors.append(err)
+    return np.array(errors)
+
+def square(left_dir, right_dir, debug_dir, out_path, board_cols, board_rows, square_size, threshold=1):
+
+    out_dir = os.path.dirname(out_path)
+    os.makedirs(out_dir, exist_ok=True)
+    ext = 'JPG'
     board_size = (board_cols, board_rows)
 
     left_paths = sorted(glob.glob(os.path.join(left_dir, f"*.{ext}")))
@@ -68,9 +80,6 @@ def square():
     imgpoints_left = []
     imgpoints_right = []
     image_size = None
-
-    if debug_dir:
-        os.makedirs(debug_dir, exist_ok=True)
 
     used, skipped = 0, 0
     for lp, rp in zip(left_paths, right_paths):
@@ -112,12 +121,24 @@ def square():
 
     # Step 1: calibrate each camera individually
     print("\nCalibrating left camera...")
-    ret_l, K_l, D_l, _, _ = cv2.calibrateCamera(objpoints, imgpoints_left, image_size, None, None)
+    ret_l, K_l, D_l, rvecs_l, tvecs_l = cv2.calibrateCamera(objpoints, imgpoints_left, image_size, None, None)
     print(f"Left camera reprojection RMS error: {ret_l:.4f} px")
 
     print("Calibrating right camera...")
-    ret_r, K_r, D_r, _, _ = cv2.calibrateCamera(objpoints, imgpoints_right, image_size, None, None)
+    ret_r, K_r, D_r, rvecs_r, tvecs_r = cv2.calibrateCamera(objpoints, imgpoints_right, image_size, None, None)
     print(f"Right camera reprojection RMS error: {ret_r:.4f} px")
+
+    # remove outliers
+    #*************************************************************************************************************
+    err_l = per_view_errors(objpoints, imgpoints_left, K_l, D_l, rvecs_l, tvecs_l)
+    err_r = per_view_errors(objpoints, imgpoints_right, K_r, D_r, rvecs_r, tvecs_r)
+    combined_err = np.maximum(err_l, err_r)
+    keep = combined_err < threshold
+    print(f"Dropping {np.sum(~keep)} / {len(keep)} pairs above {threshold}px reprojection error")
+    objpoints = [o for o, k in zip(objpoints, keep) if k]
+    imgpoints_left = [p for p, k in zip(imgpoints_left, keep) if k]
+    imgpoints_right = [p for p, k in zip(imgpoints_right, keep) if k]
+    #*************************************************************************************************************
 
     # Step 2: stereo calibration - solves for R, T between the two cameras
     print("\nRunning stereo calibration...")
@@ -140,14 +161,14 @@ def square():
 
     # Step 4: save results
     np.savez(
-        out_dir,
+        out_path,
         K_l=K_l, D_l=D_l, K_r=K_r, D_r=D_r,
         R=R, T=T, E=E, F=F,
         R1=R1, R2=R2, P1=P1, P2=P2, Q=Q,
         map1x=map1x, map1y=map1y, map2x=map2x, map2y=map2y,
         image_size=image_size, reproj_error=ret_stereo,
     )
-    print(f"\nSaved calibration to {out_dir}")
+    print(f"\nSaved calibration to {out_path}")
 
     # Step 5: visual sanity check - epipolar lines should align across both views
     if used > 0 and debug_dir:
@@ -164,5 +185,79 @@ def square():
               f"(green lines should cross the same real-world feature in both halves)")
 
 
+def walk_dir_calibrate(data_path):
+    right_dir = os.path.join(data_path, 'EOS6D_A_Right')
+    left_dir = os.path.join(data_path, 'EOS6D_B_Left')
+    fl_dirs = os.listdir(right_dir)
+    right_calib_dirs = [os.path.join(right_dir, p, 'calibration') for p in fl_dirs]
+    left_calib_dirs = [os.path.join(left_dir, p, 'calibration') for p in fl_dirs]
+    out_paths = [os.path.join(os.path.dirname(os.path.dirname(data_path)), 'calibration', os.path.basename(data_path), p) for p in fl_dirs]
+    # read pattern info
+    pattern_info_path = os.path.join(data_path, 'pattern_info.json')
+    with open(pattern_info_path, 'r') as f:
+        pattern_info = json.load(f)
+
+    board_cols = pattern_info['checkerboard']['inner_corners_per_row'] # Inner corners along board width
+    board_rows = pattern_info['checkerboard']['inner_corners_per_col'] # Inner corners along board height
+    square_size = pattern_info['checkerboard']['cell_height_m'] # hysical size of one square (e.g. mm)
+
+    debug_dir = os.path.join(os.path.dirname(os.path.dirname(data_path)), 'debug')
+
+    for i in range(len(out_paths)):
+        if i<6: continue
+        print(f'************** {fl_dirs[i]} **************')
+        clear_dir(debug_dir)
+        square(left_calib_dirs[i], right_calib_dirs[i], debug_dir, out_paths[i], board_cols, board_rows, square_size, threshold=1)
+
+'''
+min error (mm) (over all the camera focal lengths) for each distance
+
+distance = 0.2.  Error: 0.08997488325886244
+distance = 0.5.  Error: 0.5623430203678901
+distance = 0.8.  Error: 1.439598132141799
+distance = 1.0.  Error: 2.2493720814715603
+distance = 1.5.  Error: 5.061087183311012
+distance = 1.8.  Error: 7.2879655439678555
+distance = 2.0.  Error: 8.997488325886241
+distance = 2.5.  Error: 14.058575509197258
+distance = 3.0.  Error: 20.24434873324405
+distance = 4.0.  Error: 35.989953303544965
+distance = 5.0.  Error: 56.23430203678903
+distance = 6.0.  Error: 80.9773949329762
+'''
+
+def est_depth_error():
+    f = np.array([6018, 4923, 5488, 6003, 8044, 8097, 8304, 11194, 10254, 14106])
+    basleine = np.array([0.17, 0.17, 0.18, 0.16, 0.17, 0.17, 0.17, 0.17, 0.18, 0.21])
+    pix_er = np.array([2.3166, 1.0116, 1.4170, 6.0597, 1.2360, 1.9800, 4.1602, 4.8419, 5.6017, 1.2101])
+    z_level = np.array([0.2,0.5,0.8,1.0,1.5,1.8,2.0,2.5,3.0,4,5,6])
+
+    for z in z_level:
+        delta_z = (z**2/(basleine*f)*pix_er).min()*1e3
+        print(f'distance = {z}.  Error: {delta_z}')
+
+    # for foc in f:
+    #     cal = np.load(f'C:\\Users\\lahir\\MODEST\\calibration\\Scene4\\fl_{foc}mm.npz')
+    #     print(cal['P1'][0,0])
+
+
+
+    pass
+    
+    
 if __name__ == "__main__":
-    main()
+    est_depth_error()
+    # left_dir = r'C:\Users\lahir\MODEST\Scene4\Scene4\EOS6D_B_Left\fl_28mm\calibration'
+    # right_dir = r'C:\Users\lahir\MODEST\Scene4\Scene4\EOS6D_A_Right\fl_28mm\calibration'
+    # debug_dir = r'C:\Users\lahir\MODEST\debug' # Optional folder for corner/rectification visualizations
+    # out_dir = r'C:\Users\lahir\MODEST\calibrtion\scene4'
+
+    # walk_dir_calibrate(r'C:\Users\lahir\MODEST\Scene4\Scene4')
+
+    # square(left_dir, right_dir, debug_dir, out_dir)
+
+    # import matplotlib.pyplot as plt
+    # vals = [2.3166, 1.0116, 1.4170, 6.0597, 1.2360, 1.9800, 4.1602, 4.8419, 5.6017, 1.2101]
+    # f = [28,32,36,40,45,50,55,60,65,70] 
+    # plt.plot(f,vals)
+    # plt.show()
