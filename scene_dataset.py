@@ -128,3 +128,6 @@ if __name__ == "__main__":
     print("color:", color.shape, color.dtype)
     print("focal_length:", focal_length)
     print("aperture:", aperture)
+
+
+    
