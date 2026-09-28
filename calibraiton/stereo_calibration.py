@@ -359,6 +359,10 @@ FL_NAMES = [
 
 
 if __name__ == "__main__":
+    a = np.load(r"C:\Users\lahir\MODEST\Scene4\Scene4\stereo_calibration\fl_50mm.npz")
+    a.files
+
+
     if os.path.exists(REPORT_PATH):
         os.remove(REPORT_PATH)
     for fl_name in FL_NAMES:
