@@ -26,12 +26,10 @@ ignore.txt (one per calibration dir) lists bare filename tokens to drop, e.g.:
     0661
 
 A token is matched as a substring of the image basename on its own side. Left
-and right file lists are sorted independently, then a single keep-mask (a
-position is dropped if EITHER side's ignore.txt flags it) is applied to both,
-so filenames never need to match across cameras but the pairing by position
-stays intact.
+and right images are paired by EXIF capture time (see list_paired_images), and
+a pair is dropped if EITHER side's ignore.txt flags its image.
 
-Calibrates one fl_<N>mm focal length per run. Set the constants below, then:
+Calibrates every fl_<N>mm focal length of every scene in SCENES:
     python stereo_calibration.py
 """
 
@@ -40,9 +38,11 @@ import json
 import os
 import shutil
 import sys
+from datetime import datetime
 
 import cv2
 import numpy as np
+from PIL import Image
 
 FL_DIR_PREFIX = "fl_"
 
@@ -64,22 +64,53 @@ def read_ignore_tokens(dir_path):
         return {line.strip() for line in f if line.strip()}
 
 
-def list_paired_images(left_dir, right_dir, ext):
-    """Sorted, ignore-filtered (left_path, right_path) pairs.
+PAIR_TIME_TOL_S = 0.5  # shots are >= ~1.5 s apart; true pairs agree to ~0.1 s after the clock offset
 
-    A pair is dropped if either side's ignore.txt flags the image at that
-    position, so left/right stay aligned by index.
+
+def capture_time(path):
+    """EXIF DateTimeOriginal + SubSecTimeOriginal as POSIX seconds."""
+    exif = Image.open(path).getexif().get_ifd(0x8769)
+    stamp, subsec = exif.get(36867), exif.get(37521) or "0"
+    if stamp is None:
+        sys.exit(f"No EXIF DateTimeOriginal in {path} - cannot pair left/right images by time")
+    return datetime.strptime(stamp, "%Y:%m:%d %H:%M:%S").timestamp() + float(f"0.{subsec.strip()}")
+
+
+def list_paired_images(left_dir, right_dir, ext):
+    """Ignore-filtered (left_path, right_path) pairs, sorted by left capture time.
+
+    Pairs are matched by EXIF capture time rather than by sorted position or
+    frame number: a frame deleted from only one camera, extra frames filed on one
+    side, or one camera taking an extra shot all break positional/number pairing.
+    The camera clocks differ by a fixed offset, estimated as the left-minus-right
+    time difference that the most image combinations agree on.
+
+    A pair is dropped if either side's ignore.txt flags its image.
     """
-    left_paths = sorted(glob.glob(os.path.join(left_dir, f"*.{ext}")))
-    right_paths = sorted(glob.glob(os.path.join(right_dir, f"*.{ext}")))
-    if len(left_paths) != len(right_paths):
-        sys.exit(
-            f"Mismatch: {len(left_paths)} left images vs {len(right_paths)} right "
-            f"images in {left_dir} / {right_dir}. Filenames must correspond 1:1 "
-            f"in sorted order."
-        )
-    if not left_paths:
+    left_paths = glob.glob(os.path.join(left_dir, f"*.{ext}"))
+    right_paths = glob.glob(os.path.join(right_dir, f"*.{ext}"))
+    if not left_paths or not right_paths:
         sys.exit(f"No images found in {left_dir} / {right_dir} with extension .{ext}")
+
+    left_t = {p: capture_time(p) for p in left_paths}
+    right_t = {p: capture_time(p) for p in right_paths}
+    diffs = np.array([lt - rt for lt in left_t.values() for rt in right_t.values()])
+    support = [np.sum(np.abs(diffs - d) < PAIR_TIME_TOL_S) for d in diffs]
+    best = diffs[int(np.argmax(support))]
+    clock_offset = float(np.median(diffs[np.abs(diffs - best) < PAIR_TIME_TOL_S]))
+
+    matched = []
+    unused_right = set(right_paths)
+    for lp in sorted(left_paths, key=left_t.get):
+        target = left_t[lp] - clock_offset
+        rp = min(unused_right, key=lambda p: abs(right_t[p] - target), default=None)
+        if rp is not None and abs(right_t[rp] - target) < PAIR_TIME_TOL_S:
+            matched.append((lp, rp))
+            unused_right.remove(rp)
+    n_unmatched_l = len(left_paths) - len(matched)
+    n_unmatched_r = len(right_paths) - len(matched)
+    print(f"Paired {len(matched)} images by capture time (clock offset {clock_offset:+.2f} s; "
+          f"unmatched: {n_unmatched_l} left, {n_unmatched_r} right)")
 
     left_tokens = read_ignore_tokens(left_dir)
     right_tokens = read_ignore_tokens(right_dir)
@@ -89,10 +120,10 @@ def list_paired_images(left_dir, right_dir, ext):
         return any(tok in name for tok in tokens)
 
     pairs = [
-        (lp, rp) for lp, rp in zip(left_paths, right_paths)
+        (lp, rp) for lp, rp in matched
         if not (ignored(lp, left_tokens) or ignored(rp, right_tokens))
     ]
-    n_dropped = len(left_paths) - len(pairs)
+    n_dropped = len(matched) - len(pairs)
     if n_dropped:
         print(f"Dropped {n_dropped} ignored pair(s) per ignore.txt")
     return pairs
@@ -143,15 +174,15 @@ def robust_outlier_threshold(errors, k):
     return median + k * 1.4826 * mad
 
 
-def stereo_calibrate_fl(fl_name, right_dir, left_dir, intrinsics_a_dir, intrinsics_b_dir,
+def stereo_calibrate_fl(fl_name, right_dir, left_dir, intrinsics_right_dir, intrinsics_left_dir,
                          pattern_info_path, out_dir, report_path=None, ext="JPG",
                          debug_dir=None, outlier_k=3.5):
     """Stereo-calibrate one fl_<N>mm focal length and save the result.
 
-    right_dir/left_dir are the EOS6D_A_Right/EOS6D_B_Left roots (each containing
-    an fl_<N>mm/calibration subdirectory). intrinsics_a_dir/intrinsics_b_dir hold
-    the fl_<N>mm.npz files from charuco_calibration.py for the right/left cameras
-    respectively.
+    right_dir/left_dir are the right/left camera roots, e.g. EOS6D_A_Right and
+    EOS6D_B_Left (each containing an fl_<N>mm/calibration subdirectory).
+    intrinsics_right_dir/intrinsics_left_dir hold the fl_<N>mm.npz files from
+    charuco_calibration.py for whichever camera is on that side in this scene.
     """
     os.makedirs(out_dir, exist_ok=True)
     if debug_dir:
@@ -215,8 +246,8 @@ def stereo_calibrate_fl(fl_name, right_dir, left_dir, intrinsics_a_dir, intrinsi
     if used < 10:
         print("Warning: fewer than 10 usable pairs - calibration accuracy will suffer.")
 
-    K_l, D_l = load_intrinsics(intrinsics_b_dir, fl_name, image_size)  # Left = label B
-    K_r, D_r = load_intrinsics(intrinsics_a_dir, fl_name, image_size)  # Right = label A
+    K_l, D_l = load_intrinsics(intrinsics_left_dir, fl_name, image_size)
+    K_r, D_r = load_intrinsics(intrinsics_right_dir, fl_name, image_size)
 
     criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 200, 1e-6)
     ret, K_l, D_l, K_r, D_r, R, T, E, F, rvecs, tvecs, per_view_errors = cv2.stereoCalibrateExtended(
@@ -331,16 +362,17 @@ def stereo_calibrate_fl(fl_name, right_dir, left_dir, intrinsics_a_dir, intrinsi
         print(f"Appended report entry to {report_path}")
 
 
-SCENE_DIR = r"C:\Users\lahir\MODEST\Scene4\Scene4"
-RIGHT_DIR = os.path.join(SCENE_DIR, "EOS6D_A_Right")
-LEFT_DIR = os.path.join(SCENE_DIR, "EOS6D_B_Left")
-INTRINSICS_A_DIR = r"C:\Users\lahir\MODEST\Global_calibration_set\MODEST_ChArUco\Global_calibration_set\ChArUco_pattern\EOS_6D_A\calibration"
-INTRINSICS_B_DIR = r"C:\Users\lahir\MODEST\Global_calibration_set\MODEST_ChArUco\Global_calibration_set\ChArUco_pattern\EOS_6D_B\calibration"
-PATTERN_INFO_PATH = os.path.join(SCENE_DIR, "pattern_info.json")
-
-OUT_DIR = os.path.join(SCENE_DIR, "stereo_calibration")
-DEBUG_DIR = os.path.join(SCENE_DIR, "stereo_calibration", "debug")
-REPORT_PATH = os.path.join(OUT_DIR, "stereo_report.txt")
+MODEST_DIR = r"C:\Users\lahir\MODEST"
+SCENES = ["Scene2", "Scene3", "Scene5", "Scene6", "Scene7", "Scene8", "Scene9"]
+INTRINSICS_ROOT = os.path.join(
+    MODEST_DIR, "Global_calibration_set", "MODEST_ChArUco", "Global_calibration_set", "ChArUco_pattern"
+)
+INTRINSICS_DIRS = {  # camera label -> charuco_calibration.py output
+    "A": os.path.join(INTRINSICS_ROOT, "EOS_6D_A", "calibration"),
+    "B": os.path.join(INTRINSICS_ROOT, "EOS_6D_B", "calibration"),
+}
+# Used when a scene has no pattern_info.json of its own (Scene9); all scenes share the same board.
+FALLBACK_PATTERN_INFO_PATH = os.path.join(MODEST_DIR, "Scene1", "pattern_info.json")
 EXT = "JPG"
 OUTLIER_K = 3.5  # adaptive outlier cutoff: median + OUTLIER_K * MAD of per-pair reprojection error
 
@@ -358,17 +390,45 @@ FL_NAMES = [
 ]
 
 
-if __name__ == "__main__":
-    a = np.load(r"C:\Users\lahir\MODEST\Scene4\Scene4\stereo_calibration\fl_50mm.npz")
-    a.files
+def camera_dir(scene_dir, side):
+    """(path, label) of the EOS6D_<label>_<side> dir; which label sits on which side varies per scene."""
+    matches = glob.glob(os.path.join(scene_dir, f"EOS6D_*_{side}"))
+    if len(matches) != 1:
+        sys.exit(f"Expected one EOS6D_*_{side} dir in {scene_dir}, found {matches}")
+    return matches[0], os.path.basename(matches[0]).split("_")[1]
 
 
-    if os.path.exists(REPORT_PATH):
-        os.remove(REPORT_PATH)
+def stereo_calibrate_scene(scene_dir):
+    right_dir, right_label = camera_dir(scene_dir, "Right")
+    left_dir, left_label = camera_dir(scene_dir, "Left")
+    pattern_info_path = os.path.join(scene_dir, "pattern_info.json")
+    if not os.path.isfile(pattern_info_path):
+        print(f"No pattern_info.json in {scene_dir}, using {FALLBACK_PATTERN_INFO_PATH}")
+        pattern_info_path = FALLBACK_PATTERN_INFO_PATH
+
+    out_dir = os.path.join(scene_dir, "stereo_calibration")
+    debug_dir = os.path.join(out_dir, "debug")
+    report_path = os.path.join(out_dir, "stereo_report.txt")
+    print(f"\n============== {scene_dir}  (Left={left_label}, Right={right_label}) ==============")
+    if os.path.exists(report_path):
+        os.remove(report_path)
     for fl_name in FL_NAMES:
+        missing = [
+            d for d in (right_dir, left_dir)
+            if not glob.glob(os.path.join(d, fl_name, "calibration", f"*.{EXT}"))
+        ]
+        if missing:
+            print(f"Skipping {fl_name}: no calibration images in {missing}")
+            continue
         stereo_calibrate_fl(
-            fl_name, RIGHT_DIR, LEFT_DIR, INTRINSICS_A_DIR, INTRINSICS_B_DIR,
-            PATTERN_INFO_PATH, OUT_DIR,
-            report_path=REPORT_PATH, ext=EXT,
-            debug_dir=DEBUG_DIR, outlier_k=OUTLIER_K,
+            fl_name, right_dir, left_dir,
+            INTRINSICS_DIRS[right_label], INTRINSICS_DIRS[left_label],
+            pattern_info_path, out_dir,
+            report_path=report_path, ext=EXT,
+            debug_dir=debug_dir, outlier_k=OUTLIER_K,
         )
+
+
+if __name__ == "__main__":
+    for scene in SCENES:
+        stereo_calibrate_scene(os.path.join(MODEST_DIR, scene))

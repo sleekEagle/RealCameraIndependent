@@ -16,7 +16,11 @@ from pathlib import Path
 import cv2
 import cv2.aruco as aruco
 import matplotlib
-matplotlib.use("QtAgg")
+# Agg (not QtAgg): matplotlib.use() only records the backend choice -- the actual backend
+# module isn't imported until the first figure is created, so a try/except around this call
+# can't catch a missing Qt binding anyway. This module never calls plt.show(), only
+# fig.savefig(), so a headless backend is correct here regardless of what's installed.
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 from PIL import Image
@@ -590,31 +594,29 @@ def fit_k_gamma_pooled(settings, n_bins: int = 40, min_bin_samples: int = 20):
     }
 
 
-def run_k_gamma_pooled_report():
-    """Fit a single shared k and gamma across every (camera side, focal length) setting (see
-    fit_k_gamma_pooled()), using each setting's independent D_focus estimate (from
-    focaldist_estimation_calibimgs.py's dfocus_results.txt) as its known focus distance s. Both
-    EOS_6D_A (L) and EOS_6D_B (R)'s ESF-width CSVs must already exist under <camera_dir>/debug
-    (see run_all_esf_extraction()). Saves a per-setting diagnostics CSV (with the shared k/gamma
-    repeated on every row) and a markdown report to out_dir."""
-    calib_root = Path(r"C:\Users\lahir\MODEST\Global_calibration_set\MODEST_ChArUco"
-                       r"\Global_calibration_set\ChArUco_pattern")
-    dfocus_path = Path(r"D:\datasets\MODEST_processed\scene4_dfocus\dfocus_results.txt")
-    out_dir = Path(r"D:\datasets\MODEST_processed\global_def_calib")
-    scan = "both"
-    out_dir.mkdir(parents=True, exist_ok=True)
+CALIB_ROOT = Path(r"C:\Users\lahir\MODEST\Global_calibration_set\MODEST_ChArUco"
+                   r"\Global_calibration_set\ChArUco_pattern")
+DFOCUS_PATH = Path(r"D:\datasets\MODEST_processed\scene4_dfocus\dfocus_results.txt")
+OUT_DIR = Path(r"D:\datasets\MODEST_processed\global_def_calib")
 
-    with open(calib_root / "pattern_info_charuco.json") as f:
+
+def _build_k_gamma_settings(scan: str = "both"):
+    """Build the list of {"label", "side", "focal", "focal_mm", "depth", "width", "s", "f", "N"}
+    settings -- one per (camera side, focal length) -- shared by run_k_gamma_pooled_report() and
+    run_k_gamma_separate_report(). Both EOS_6D_A (L) and EOS_6D_B (R)'s ESF-width CSVs must
+    already exist under <camera_dir>/debug (see run_all_esf_extraction()); s is each setting's
+    independent D_focus estimate from focaldist_estimation_calibimgs.py's dfocus_results.txt."""
+    with open(CALIB_ROOT / "pattern_info_charuco.json") as f:
         N = json.load(f)["camera_params"]["f_number"]
 
     settings = []
     for side, cam_name in CAMERA_DIRS.items():
-        debug_dir = calib_root / cam_name / "debug"
-        dfocus = load_dfocus_results(dfocus_path, side=side)
+        debug_dir = CALIB_ROOT / cam_name / "debug"
+        dfocus = load_dfocus_results(DFOCUS_PATH, side=side)
         res = load_widths_by_focal(debug_dir, scan)
         for focal_name in sorted(res, key=lambda name: int(name[3:-2])):
             if focal_name not in dfocus:
-                print(f"[skip] {side} {focal_name}: no D_focus entry in {dfocus_path.name}")
+                print(f"[skip] {side} {focal_name}: no D_focus entry in {DFOCUS_PATH.name}")
                 continue
             data = res[focal_name]
             focal_mm = int(focal_name[3:-2])
@@ -623,6 +625,17 @@ def run_k_gamma_pooled_report():
                 "focal_mm": focal_mm, "depth": data["depth"], "width": data["width"],
                 "s": dfocus[focal_name], "f": focal_mm / 1000, "N": N,
             })
+    return settings, N
+
+
+def run_k_gamma_pooled_report():
+    """Fit a single shared k and gamma across every (camera side, focal length) setting (see
+    fit_k_gamma_pooled()). Saves a per-setting diagnostics CSV (with the shared k/gamma repeated
+    on every row) and a markdown report to OUT_DIR. Compare against
+    run_k_gamma_separate_report(), which fits k/gamma independently per setting instead."""
+    out_dir = OUT_DIR
+    out_dir.mkdir(parents=True, exist_ok=True)
+    settings, N = _build_k_gamma_settings()
 
     fit = fit_k_gamma_pooled(settings)
     print(f"pooled: k={fit['k']:.4e} +- {fit['k_stderr']:.2e}   "
@@ -692,8 +705,8 @@ def run_k_gamma_pooled_report():
     report_lines = [
         "# Pooled k / gamma calibration report",
         "",
-        f"f-number: {N}, scan direction pooled: {scan}",
-        f"S values (per side, per focal length): {dfocus_path}",
+        f"f-number: {N}, scan direction pooled: both",
+        f"S values (per side, per focal length): {DFOCUS_PATH}",
         f"Settings pooled: {fit['n_settings']} (both EOS_6D_A/L and EOS_6D_B/R, "
         f"{len(focal_mms)} focal lengths each)",
         "",
@@ -730,8 +743,121 @@ def run_k_gamma_pooled_report():
     print(f"wrote {report_path}")
 
 
+def run_k_gamma_separate_report():
+    """Fit k and gamma independently for every (camera side, focal length) setting -- i.e. run
+    fit_k_gamma_pooled() once per setting, on a single-setting list, which reduces exactly to an
+    ordinary per-setting linear fit (no pooling across settings). This is the comparison point
+    for run_k_gamma_pooled_report()'s single shared k/gamma: it shows how much k and gamma
+    actually vary when each setting is allowed its own value, and how much (if any) fit quality
+    is gained over the pooled fit. Saves a results CSV, a k/gamma-vs-focal-length plot (both
+    sides), and a markdown report to OUT_DIR."""
+    out_dir = OUT_DIR
+    out_dir.mkdir(parents=True, exist_ok=True)
+    settings, N = _build_k_gamma_settings()
+
+    rows = []
+    for setting in settings:
+        fit = fit_k_gamma_pooled([setting])
+        gamma_str = f"{fit['gamma']:.3f}" if fit["gamma"] is not None else \
+            f"None (negative intercept c={fit['c']:.3f})"
+        print(f"{setting['label']}: k={fit['k']:.4e} +- {fit['k_stderr']:.2e}   "
+              f"gamma={gamma_str} px  rmse={fit['rmse']:.3f} px  (n_bins={fit['per_setting'][0]['n_bins']})")
+        rows.append({
+            "side": setting["side"], "focal": setting["focal"], "focal_mm": setting["focal_mm"],
+            "f_number": setting["N"], "s_m": setting["s"],
+            "n_raw_samples": len(setting["depth"]), "n_bins": fit["per_setting"][0]["n_bins"],
+            "k": fit["k"], "k_stderr": fit["k_stderr"],
+            "gamma_px": fit["gamma"], "gamma_stderr": fit["gamma_stderr"],
+            "c": fit["c"], "c_stderr": fit["c_stderr"], "rmse_px": fit["rmse"],
+        })
+
+    fieldnames = ["side", "focal", "focal_mm", "f_number", "s_m", "n_raw_samples", "n_bins",
+                  "k", "k_stderr", "gamma_px", "gamma_stderr", "c", "c_stderr", "rmse_px"]
+    csv_path = out_dir / "k_gamma_separate_results.csv"
+    with open(csv_path, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+    print(f"wrote {csv_path}")
+
+    fig, (ax_k, ax_g) = plt.subplots(1, 2, figsize=(11, 5))
+    side_colors = {"L": "tab:blue", "R": "tab:red"}
+    for side in ("L", "R"):
+        side_rows = [r for r in rows if r["side"] == side]
+        focal_mms = [r["focal_mm"] for r in side_rows]
+        ax_k.errorbar(focal_mms, [r["k"] for r in side_rows],
+                      yerr=[r["k_stderr"] for r in side_rows], marker="o", capsize=3,
+                      color=side_colors[side], label=side)
+        ax_g.errorbar(focal_mms, [r["gamma_px"] if r["gamma_px"] is not None else np.nan
+                                   for r in side_rows],
+                      yerr=[r["gamma_stderr"] if r["gamma_stderr"] is not None else 0
+                            for r in side_rows], marker="o", capsize=3,
+                      color=side_colors[side], label=side)
+    ax_k.set_xlabel("focal length (mm)")
+    ax_k.set_ylabel("fitted k")
+    ax_k.set_title("k vs focal length (fit separately per setting)")
+    ax_k.legend()
+    ax_g.set_xlabel("focal length (mm)")
+    ax_g.set_ylabel("fitted blur floor gamma (px)")
+    ax_g.set_title("gamma vs focal length (fit separately per setting)")
+    ax_g.legend()
+    fig.suptitle(f"separate k / gamma per (side, focal length) setting (f/{N})")
+    fig.tight_layout()
+    plot_path = out_dir / "k_gamma_separate_vs_focal_length.png"
+    fig.savefig(plot_path, dpi=150)
+    plt.close(fig)
+    print(f"wrote {plot_path}")
+
+    ks = np.array([r["k"] for r in rows])
+    gammas = np.array([r["gamma_px"] if r["gamma_px"] is not None else np.nan for r in rows])
+    n_negative = int(np.isnan(gammas).sum())
+    report_lines = [
+        "# Separate (per-setting) k / gamma calibration report",
+        "",
+        f"f-number: {N}, scan direction pooled: both",
+        f"S values (per side, per focal length): {DFOCUS_PATH}",
+        f"Settings fit independently: {len(rows)} (both EOS_6D_A/L and EOS_6D_B/R)",
+        "",
+        "Each (side, focal length) setting gets its own k, gamma from an ordinary least-squares "
+        "fit on just that setting's own binned (h(s, d, f, N), width^2) points -- no pooling "
+        "across settings. Compare against run_k_gamma_pooled_report()'s single shared k, gamma.",
+        "",
+        "## Per-setting results",
+        "",
+        "| side | focal | S (m) | n_raw | n_bins | k | k stderr | gamma (px) | "
+        "gamma stderr | rmse (px) |",
+        "|---|---|---|---|---|---|---|---|---|---|",
+    ]
+    for r in rows:
+        gamma_str = f"{r['gamma_px']:.3f}" if r["gamma_px"] is not None else \
+            f"None (c={r['c']:.3f})"
+        gamma_stderr_str = f"{r['gamma_stderr']:.3f}" if r["gamma_stderr"] is not None else "-"
+        report_lines.append(
+            f"| {r['side']} | {r['focal']} | {r['s_m']:.3f} | {r['n_raw_samples']} | "
+            f"{r['n_bins']} | {r['k']:.3e} | {r['k_stderr']:.2e} | {gamma_str} | "
+            f"{gamma_stderr_str} | {r['rmse_px']:.3f} |"
+        )
+    report_lines += [
+        "",
+        "## Summary",
+        "",
+        f"- k: mean={ks.mean():.3e}, std={ks.std():.3e}, range=[{ks.min():.3e}, {ks.max():.3e}]",
+        f"- gamma: mean={np.nanmean(gammas):.3f} px, std={np.nanstd(gammas):.3f} px, "
+        f"range=[{np.nanmin(gammas):.3f}, {np.nanmax(gammas):.3f}] px",
+        f"- {n_negative}/{len(rows)} settings had a negative OLS intercept (no real gamma).",
+        "",
+        f"See {plot_path.name} for k and gamma plotted per setting, and {csv_path.name} for "
+        "the full numbers. See k_gamma_pooled_report.md / k_gamma_pooled_results.csv for the "
+        "single shared-k/gamma fit to compare against.",
+    ]
+    report_path = out_dir / "k_gamma_separate_report.md"
+    with open(report_path, "w") as f:
+        f.write("\n".join(report_lines) + "\n")
+    print(f"wrote {report_path}")
+
+
 def main():
-    run_all_esf_extraction()
+    run_k_gamma_separate_report()
 
 
 if __name__ == "__main__":
