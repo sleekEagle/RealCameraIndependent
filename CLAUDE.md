@@ -1,0 +1,1 @@
+use plain language, short sentences, and avoid dense or overly compressed phrasing. you can use basic math and ML terms.
