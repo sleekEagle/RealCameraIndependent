@@ -72,6 +72,13 @@ python -m depth_bench.evaluate --model da3 --fold S1 --ckpt <RUNS>/finetune/da3_
 python -m depth_bench.pilot
 ```
 
+## Full benchmark on RunPod
+
+1. Locally: `python -m depth_bench.pack_for_colab` (writes `D:\datasets\MODEST_colab`, 36 GB).
+2. Create a pod: template "RunPod PyTorch", e.g. RTX 4090, volume disk 150 GB at `/workspace`, On-Demand.
+3. Send the data: on the PC `runpodctl send D:\datasets\MODEST_colab`, on the pod `cd /workspace && runpodctl receive <code>`.
+4. On the pod: `curl -sL https://raw.githubusercontent.com/sleekEagle/RealCameraIndependent/main/depth_bench/setup_pod.sh | bash`. It sets everything up and starts `run_all` in the background. Follow with `tail -f /workspace/MODEST_runs/run_all.log`. After a pod restart, run the same command again.
+
 ## Full benchmark on Google Colab
 
 1. Locally: `python -m depth_bench.pack_for_colab` writes `D:\datasets\MODEST_colab` (9 scene tars, `manifest.csv`, `dfocus_aperture_pairs.csv`; 36 GB). Upload that folder to Google Drive as `MyDrive/MODEST_colab`.

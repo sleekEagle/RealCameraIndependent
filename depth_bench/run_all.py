@@ -71,7 +71,9 @@ def main(argv=None):
     ap.add_argument("--ft_samples", type=int, default=40000, help="fine-tuning budget (crops)")
     ap.add_argument("--scratch_samples", type=int, default=200000, help="from-scratch budget (crops)")
     ap.add_argument("--crops", type=int, default=6, help="fixed evaluation crops per test image")
-    ap.add_argument("--workers", type=int, default=min(4, os.cpu_count() or 2))
+    # data loading decodes 20 MP images (~0.4 s each), so fast GPUs need several workers; on Windows
+    # many workers can exhaust the paging file, so fewer there
+    ap.add_argument("--workers", type=int, default=min(8 if os.name != "nt" else 4, os.cpu_count() or 2))
     ap.add_argument("--dry_run", action="store_true")
     a = ap.parse_args(argv)
     ev = ["--crops", str(a.crops), "--workers", str(a.workers)]
