@@ -1,10 +1,15 @@
 """Mixed precision and checkpoint helpers shared by finetune and evaluate."""
 import contextlib
+import os
 
 import torch
 
 
 def amp_dtype():
+    """bf16 where the GPU supports it, else fp16 (with loss scaling, e.g. Colab T4).
+    DEPTH_BENCH_AMP=fp16 forces fp16 (to test the T4 path on another GPU)."""
+    if os.environ.get("DEPTH_BENCH_AMP") == "fp16":
+        return torch.float16
     return torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
 
 

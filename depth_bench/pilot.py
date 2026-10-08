@@ -17,7 +17,8 @@ import sys
 
 from .config import RUNS_DIR
 
-ALL = ["da2", "unidepth", "metric3d", "da3"]
+ALL = ["da2", "unidepth", "metric3d_c6000", "da3", "camind"]
+SCRATCH = {"camind"}
 
 
 def run(args):
@@ -47,8 +48,9 @@ def main():
     ev = ["--fold", a.fold, "--max_images", str(a.images), "--crops", "2"]
     results = []
     for m in a.models:
-        run(["depth_bench.evaluate", "--model", m, *ev, "--out", f"pilot_zs_{m}_{a.fold}"])
-        results.append(("zero-shot", m, summary(f"pilot_zs_{m}_{a.fold}", a.fold)))
+        if m not in SCRATCH:  # no zero-shot for models trained from scratch
+            run(["depth_bench.evaluate", "--model", m, *ev, "--out", f"pilot_zs_{m}_{a.fold}"])
+            results.append(("zero-shot", m, summary(f"pilot_zs_{m}_{a.fold}", a.fold)))
         if m == "unidepth":
             run(["depth_bench.evaluate", "--model", "unidepth_noK", *ev, "--out", f"pilot_zs_unidepth_noK_{a.fold}"])
             results.append(("zero-shot", "unidepth_noK", summary(f"pilot_zs_unidepth_noK_{a.fold}", a.fold)))

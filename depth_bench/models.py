@@ -16,6 +16,7 @@ Models (and the HF / hub checkpoints they load):
     unidepth UniDepth V2, ViT-S/B/L; uses the given intrinsics unless use_intrinsics=False
     metric3d Metric3D v2 ConvNeXt-L (canonical focal 1000 px, label-scale mode)
     da3      Depth Anything 3 metric large (canonical focal 300 px)
+    camind   Camind (WACV 2024) network as a plain two-stage CNN, trained from scratch, no camera input
 """
 import sys
 
@@ -155,6 +156,32 @@ class Metric3DW(BaseWrapper):
         self.net = torch.hub.load(repo, f"metric3d_{variant}", pretrain=True, source="local", trust_repo=True)
         self.variant = variant
         self.canonical_focal = float(canonical_focal)
+        self._decoder_fp32()
+
+    def _decoder_fp32(self):
+        """Under fp16 autocast (GPUs without bf16, e.g. Colab T4) the decoder overflows: activations in
+        decoder_mono.upconv_1_1 reach ~34000 (fp16 max 65504) and conv_out_2 gives inf, so the depth is
+        NaN. The encoder is fine. So with fp16 the decoder runs in fp32 (autocast off, inputs cast up).
+        bf16 has the fp32 range, so nothing changes there."""
+        from .train_utils import amp_dtype
+        if amp_dtype() != torch.float16:
+            return
+        dec = self.net.depth_model.decoder
+        fwd = dec.forward
+
+        def up(x):
+            if torch.is_tensor(x):
+                return x.float() if x.is_floating_point() else x
+            if isinstance(x, (list, tuple)):
+                return type(x)(up(v) for v in x)
+            if isinstance(x, dict):
+                return {k: up(v) for k, v in x.items()}
+            return x
+
+        def fwd32(*args, **kw):
+            with torch.autocast("cuda", enabled=False):
+                return fwd(*up(args), **up(kw))
+        dec.forward = fwd32
 
     CANVAS = (544, 1216)  # Metric3D ConvNeXt training input size
 
@@ -217,6 +244,60 @@ class DA3Metric(BaseWrapper):
         return [self.net.head]
 
 
+class CamindW(BaseWrapper):
+    """Camind: "Camera-Independent Single Image Depth Estimation from Defocus Blur" (WACV 2024),
+    network copied unchanged in camind_net.py (dofNet_arch4.AENet, 16 base filters). Trained from scratch.
+
+    Stage 1 maps the RGB crop to a one-channel map (the intermediate "blur" output). Stage 2 maps that
+    map (plus a second input channel) to metric depth.
+
+    Benchmark setting: a plain two-stage CNN with no camera information (differs from the paper on purpose):
+      - no blur supervision: the loss is depth MSE only, so the stage-1 map is learned only through it;
+      - no manipulation of the stage-1 map: the paper's camera correction (multiplying it by
+        kcam * (s - f)) is turned off (AENet camind=False), so stage 2 gets the stage-1 map as it is;
+      - no focus distance: stage 2's second input channel, the focus distance in the paper, is filled
+        with the constant FOC_CONST for every image. The network is unchanged, so the channel stays.
+    It uses neither the intrinsics nor any lens setting."""
+    name = "camind"
+    pretrained = False
+    FOC_CONST = 1.0
+
+    def __init__(self, num_filter=16):
+        super().__init__()
+        from .camind_net import AENet
+        self.net = AENet(3, 1, num_filter, flag_step2=True)
+        self.last_blur = None   # stage-1 output of the last forward pass, for analysis
+
+    def forward(self, image, K=None):
+        H, W = image.shape[-2:]
+        ph, pw = (-H) % 16, (-W) % 16           # 4 poolings
+        x = F.pad(image, (0, pw, 0, ph), mode="reflect") if ph or pw else image
+        B, _, Hp, Wp = x.shape
+        foc_dist = x.new_full((B, 1, Hp, Wp), self.FOC_CONST)
+        depth, blur, _ = self.net(x, camind=False, camparam=None, foc_dist=foc_dist)
+        self.last_blur = blur[:, 0, :H, :W]
+        return depth[:, 0, :H, :W]
+
+    def loss(self, pred, batch):
+        gt = batch["depth"].cuda(non_blocking=True)
+        v = torch.isfinite(gt) & (gt > 0)
+        return F.mse_loss(pred.float()[v], gt[v])   # depth only: no blur supervision
+
+    def encoder_blocks(self):
+        return []
+
+    def head_modules(self):
+        return [self.net]   # trained from scratch: everything is trainable
+
+
+def predict(model, batch):
+    """Run a wrapper on a collated batch (passes the lens settings to models that need them)."""
+    img, K = batch["image"].cuda(non_blocking=True), batch["K"].cuda(non_blocking=True)
+    if getattr(model, "needs_camera", False):
+        return model(img, K, batch["cam"].cuda(non_blocking=True))
+    return model(img, K)
+
+
 MODELS = {
     "da2": lambda **kw: DA2Metric(**kw),
     "unidepth": lambda **kw: UniDepthV2W(**kw),
@@ -224,6 +305,7 @@ MODELS = {
     "metric3d": lambda **kw: Metric3DW(**kw),                              # official canonical focal 1000
     "metric3d_c6000": lambda **kw: Metric3DW(canonical_focal=6000.0, **kw),  # for fine-tuning on MODEST
     "da3": lambda **kw: DA3Metric(**kw),
+    "camind": lambda **kw: CamindW(**kw),   # from scratch
 }
 
 

@@ -14,7 +14,7 @@ import tifffile
 import torch
 from torch.utils.data import Dataset, IterableDataset, get_worker_info
 
-from .config import DEPTH_ROOT, MANIFEST, MAX_DEPTH, MIN_DEPTH
+from .config import DEPTH_ROOT, FOCUS_CSV, MANIFEST, MAX_DEPTH, MIN_DEPTH
 
 
 def read_manifest(path=MANIFEST):
@@ -30,6 +30,28 @@ def select(rows, fold=None, labels=None, view_role=None):
     if view_role is not None:
         out = [r for r in out if r["view_role"] == view_role]
     return out
+
+
+_FOCUS = None
+
+
+def focus_table(path=FOCUS_CSV):
+    """(scene, fl_mm, side) -> estimated focus distance in metres (def_calibration/focus_from_aperture_pairs.py).
+    Empty if the file is missing."""
+    global _FOCUS
+    if _FOCUS is None:
+        _FOCUS = {}
+        if path.exists():
+            with open(path, newline="") as f:
+                _FOCUS = {(int(r["scene"]), int(r["fl_mm"]), r["side"]): float(r["d_focus"])
+                          for r in csv.DictReader(f) if r["status"] == "ok"}
+    return _FOCUS
+
+
+def camera(row):
+    """Lens settings of an image: [real focal length (m), F-number, focus distance (m, NaN if unknown)]."""
+    s = focus_table().get((int(row["scene"]), int(row["fl_mm"]), row["side"]), float("nan"))
+    return torch.tensor([float(row["f_true_mm"]) / 1000, float(row["f_number"]), s], dtype=torch.float32)
 
 
 def _path(rel):
@@ -66,6 +88,7 @@ def crop_sample(img, depth, row, x0, y0, size, flip=False):
         "image": torch.from_numpy(np.ascontiguousarray(im)).permute(2, 0, 1).float() / 255.0,
         "depth": torch.from_numpy(np.ascontiguousarray(d)),
         "K": torch.from_numpy(intrinsics(row, x0, y0, size, flip)),
+        "cam": camera(row),
     }
 
 
@@ -163,7 +186,7 @@ def collate(batch):
     batch = [b for b in batch if b is not None]
     if not batch:
         return None
-    out = {k: torch.stack([b[k] for b in batch]) for k in ("image", "depth", "K")}
+    out = {k: torch.stack([b[k] for b in batch]) for k in ("image", "depth", "K", "cam")}
     for k in batch[0]:
         if k not in out:
             out[k] = [b[k] for b in batch]

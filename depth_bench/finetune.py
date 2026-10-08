@@ -1,5 +1,7 @@
 """
 Fine-tune one model on one setting fold (same recipe for every model).
+Models without pretrained weights (camind, camind_nocorr) are trained from scratch with the same
+loop: all their weights are trained, with --lr_head, and with their own loss (model.loss).
 
 Recipe: train the head and the last `--unfreeze` fraction of encoder blocks; AdamW with a
 lower learning rate for the encoder; linear warm-up then cosine decay; SILog loss on metric
@@ -10,7 +12,8 @@ the fold's `val` views) picks the best checkpoint. Runs can be resumed.
 
 Example (depthbench env):
     python -m depth_bench.finetune --model da3 --fold S1 --samples 40000 --batch 2 --accum 8
-Writes <RUNS_DIR>/finetune/<model>_<fold>[_<tag>]/ : last.pt, best.pt, log.csv, config.json
+Writes <RUNS_DIR>/finetune/<model>_<fold>[_<tag>]/ : last.pt, best.pt, log.csv, config.json,
+and done.json when finished.
 """
 import argparse
 import csv
@@ -36,7 +39,7 @@ def validate(model, loader):
         for b in loader:
             if b is None:
                 continue
-            pred = model(b["image"].cuda(non_blocking=True), b["K"].cuda(non_blocking=True))
+            pred = models.predict(model, b)
             vals += [m["absrel"] for m in depth_metrics(pred.float().cpu(), b["depth"]) if "absrel" in m]
     return float(np.mean(vals)) if vals else float("nan")
 
@@ -103,12 +106,16 @@ def main(argv=None):
                         num_workers=min(2, a.workers), collate_fn=data.collate)
     if step == 0:
         best = validate(model, val_dl)
-        print(f"step 0 (zero-shot) val AbsRel {best:.4f}", flush=True)
+        if not math.isfinite(best):
+            raise RuntimeError("validation AbsRel is not finite before training (forward pass overflows? "
+                               f"mixed precision: {amp_dtype()})")
+        print(f"step 0 ({'zero-shot' if getattr(model, 'pretrained', True) else 'random init'}) val AbsRel {best:.4f}", flush=True)
         log_rows.append({"step": 0, "loss": "", "val_absrel": best, "time_s": 0})
 
     it = iter(train_dl)
     t0 = time.time()
     run_loss = []
+    bad = 0  # optimizer steps in a row with a non-finite loss
     while step < steps:
         set_train_mode(model)
         mult = (step + 1) / warm if step < warm else 0.5 * (1 + math.cos(math.pi * (step - warm) / max(1, steps - warm)))
@@ -118,8 +125,11 @@ def main(argv=None):
         for _ in range(a.accum):
             b = next(it)
             with autocast_ctx():
-                pred = model(b["image"].cuda(non_blocking=True), b["K"].cuda(non_blocking=True))
-            loss = silog_loss(pred.float(), b["depth"].cuda(non_blocking=True)) / a.accum
+                pred = models.predict(model, b)
+            if hasattr(model, "loss"):  # model's own loss (camind: depth MSE)
+                loss = model.loss(pred, b) / a.accum
+            else:
+                loss = silog_loss(pred.float(), b["depth"].cuda(non_blocking=True)) / a.accum
             scaler.scale(loss).backward()
             run_loss.append(loss.item() * a.accum)
         scaler.unscale_(opt)
@@ -127,11 +137,19 @@ def main(argv=None):
         scaler.step(opt)
         scaler.update()
         step += 1
+        if not all(math.isfinite(x) for x in run_loss[-a.accum:]):
+            bad += 1  # fp16 loss scaling may skip a few steps; a long run of them means overflow
+            if bad >= 20:
+                raise RuntimeError(f"loss not finite for 20 steps in a row (step {step}, mixed precision: {amp_dtype()})")
+        else:
+            bad = 0
         if step % 10 == 0:
             print(f"step {step}/{steps} loss {np.mean(run_loss[-10 * a.accum:]):.4f} lr {opt.param_groups[0]['lr']:.2e} "
                   f"{(time.time() - t0) / step:.2f}s/step, GPU peak {torch.cuda.max_memory_allocated() / 1e9:.1f} GB", flush=True)
         if step % a.val_every == 0 or step == steps:
             v = validate(model, val_dl)
+            if not math.isfinite(v):
+                raise RuntimeError(f"validation AbsRel is not finite at step {step} (mixed precision: {amp_dtype()})")
             log_rows.append({"step": step, "loss": float(np.mean(run_loss)), "val_absrel": v, "time_s": round(time.time() - t0)})
             run_loss = []
             state = trainable_state(model)
@@ -146,6 +164,8 @@ def main(argv=None):
                     w.writeheader()
                 w.writerows(log_rows)
             log_rows = []
+    (run / "done.json").write_text(json.dumps({"best_val_absrel": best, "steps": step,
+                                               "time_s": round(time.time() - t0)}))
     print(f"done: best val AbsRel {best:.4f}; checkpoints in {run}")
     return run
 

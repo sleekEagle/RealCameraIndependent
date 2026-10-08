@@ -8,12 +8,14 @@ Four monocular metric depth baselines, one interface, one training recipe, one e
 | `unidepth` / `unidepth_noK` | UniDepth V2, ViT-B | given intrinsics / predicts its own | HF `lpiccinelli/unidepth-v2-vitb14` |
 | `metric3d` / `metric3d_c6000` | Metric3D v2, ConvNeXt-L | focal length (canonical 1000 px / 6000 px) | HF `JUGGHM/Metric3D` (torch hub) |
 | `da3` | Depth Anything 3 metric, large | focal length (depth = f · out / 300) | HF `depth-anything/DA3METRIC-LARGE` |
+| `camind` | Camind (WACV 2024) network as a plain two-stage CNN U-Net | none | none: trained from scratch (`camind_net.py`, copied from `sleekEagle/defocus_camind`) |
 
 ## Design
 
 - **No resizing.** Training and evaluation use native-resolution crops (default 518 × 518), so the defocus blur stays as the camera recorded it. A crop keeps fx, fy and shifts the principal point (`data.intrinsics`).
 - **Same pixels for every model.** Wrappers (`models.py`) only normalize, pad to the model's multiple, and convert the native output to metric depth. Metric3D's ConvNeXt only behaves at its training input size, so its crop is centred in a 544 × 1216 mean-colour canvas; only the crop region is used.
 - **Metric3D canonical focal.** Metric3D predicts depth for a 1000 px camera, then multiplies by fx / 1000. Its decoder output is limited to 0.3–150 (canonical). MODEST crops have fx 4,550–12,060 px, so with 1000 px the smallest reachable depth is 1.4 m (28 mm) to 3.6 m (70 mm). Use `metric3d` for zero-shot (official setting) and `metric3d_c6000` for fine-tuning, where the smallest reachable depth is 0.23–0.6 m.
+- **Camind** is trained from scratch with the same loop (all weights trained, `--lr_head`), on depth MSE only. It is used as a plain two-stage CNN, unlike the paper: no blur supervision (no auxiliary loss on the stage-1 output), no camera correction (the stage-1 output goes to stage 2 unchanged), and no focus distance (stage 2's second input channel is a constant 1). It has no zero-shot result.
 - **Splits** come from `MODEST_depth/manifest.csv` (columns S1–S5): `train`, `val`, `test_seen`, `test_unseenF`, `test_unseenfl`, `test_both`.
 - **Evaluation** uses fixed, seeded crops per test image (same for every model and run). Metrics per crop, on valid pixels (0.3–20 m):
   - AbsRel, RMSE, δ₁ / δ₂ / δ₃ (share of pixels within 1.25, 1.25², 1.25³ of the truth);
@@ -69,5 +71,15 @@ python -m depth_bench.evaluate --model da3 --fold S1 --ckpt <RUNS>/finetune/da3_
 # pilot: every model, tiny budget, small test subset
 python -m depth_bench.pilot
 ```
+
+## Full benchmark on Google Colab
+
+1. Locally: `python -m depth_bench.pack_for_colab` writes `D:\datasets\MODEST_colab` (9 scene tars, `manifest.csv`, `dfocus_aperture_pairs.csv`; 36 GB). Upload that folder to Google Drive as `MyDrive/MODEST_colab`.
+2. Open `depth_bench/colab_run.ipynb` in Colab (GPU runtime) and run all cells. It clones this repo and the four model repos at fixed commits, installs packages, extracts the data to the local disk, and runs `run_all`.
+3. Outputs go to `MyDrive/MODEST_runs` (checkpoints, `logs/`, `eval/`). After a disconnect, run all cells again: finished steps are skipped and training resumes from `last.pt`.
+
+`run_all` order: zero-shot evaluation (`da2`, `unidepth`, `unidepth_noK`, `metric3d`, `da3`) once on all test views, then per fold and model: training (40k crops fine-tuning, 200k crops from scratch for `camind`; 16 crops per optimizer step) and evaluation of `best.pt`. `--dry_run` shows what is done and what would run.
+
+On GPUs without bf16 (T4), mixed precision uses fp16 with loss scaling. `DEPTH_BENCH_AMP=fp16` forces this path on other GPUs for testing.
 
 Outputs: `<RUNS>/eval/<out>/per_crop.csv` (one row per crop, with every fold's labels), `summary.csv` and `blur_summary.csv`; `<RUNS>/finetune/<model>_<fold>/` with `best.pt`, `last.pt` (resume), `log.csv`, `config.json`.

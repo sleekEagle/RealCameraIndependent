@@ -1,0 +1,240 @@
+# Copied unchanged (apart from this header) from github.com/sleekEagle/defocus_camind,
+# source/arch/dofNet_arch4.py: the network of "Camera-Independent Single Image Depth Estimation from
+# Defocus Blur" (WACV 2024). Used through depth_bench.models.CamindW, which adapts it to MODEST.
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+'''
+dofNet_arch1 modify to be camera independent
+
+blur_pix=|s2-s1|/s2 * f^2/[N(s1-f)] * 1/p * out_pix/sensor_pix
+blur_pix=|s2-s1|/s2 * Kcam/(s1-f)
+where 1/kcam=f^2/N * 1/p * out_pix/sensor_pix
+
+p - pixel size mm
+sensor_pix - number of pixels in the sensor
+out_pix - number of pixels in the output image
+* these 2 can be different from each other due to things like pixel binning
+Imagine a model can estimate the blur_pix given a defocused (focused) image
+This is named blur_pix_est
+|s2-s1|/s1 = blur_pix_est * (s1-f)*kcam
+'''
+
+import torch
+import torch.nn as nn
+import torch.utils.data
+
+# static architecture
+class AENet(nn.Module):
+
+    def __init__(self,in_dim,out_dim, num_filter, n_blocks=3, flag_step2=False):
+        super(AENet, self).__init__()
+        print('defNet_arch4')
+        
+        self.in_dim = in_dim
+        self.out_dim = out_dim
+        self.num_filter = num_filter
+        self.n_blocks = n_blocks
+        act_fnc = nn.LeakyReLU(0.2, inplace=True)
+        self.sig=nn.Sigmoid()
+
+
+        self.conv_down_0 = self.convsblocks(self.in_dim, self.num_filter * 1, act_fnc)
+        self.pool_0 = self.poolblock()
+
+
+        for i in range(self.n_blocks):
+            self.add_module('conv_down_' + str(i + 1), self.convsblocks(self.num_filter*(2**i)*2, self.num_filter*(2**i)*2, act_fnc))
+            self.add_module('pool_' + str(i + 1), self.poolblock())
+
+        self.bridge = self.convblock(self.num_filter*8*2,self.num_filter*16,act_fnc)
+
+        for i in range(self.n_blocks+1):
+            self.add_module('conv_up_' + str(i + 1), self.upconvblock(self.num_filter*(2**(3-i))*2, self.num_filter*(2**(3-i)), act_fnc) )
+            self.add_module('conv_joint_' + str(i + 1), self.convblock(self.num_filter*(2**(3-i))*2,self.num_filter*(2**(3-i)),act_fnc) )
+
+        self.conv_end = self.convblock(self.num_filter * 1, self.num_filter * 1, act_fnc)
+
+        self.conv_out_blur = nn.Sequential(
+            nn.Conv2d(self.num_filter, self.out_dim, kernel_size=3, stride=1, padding=1),
+            #nn.LeakyReLU()
+        )
+
+        if flag_step2:
+            self.conv_down2_0 = self.convsblocks(2, self.num_filter * 1, act_fnc)
+            self.pool2_0 = self.poolblock()
+
+
+            for i in range(self.n_blocks):
+                self.add_module('conv_down2_' + str(i + 1), self.convsblocks(self.num_filter * (2 ** i) * 2, self.num_filter * (2 ** i) * 2, act_fnc))
+                self.add_module('pool2_' + str(i + 1), self.poolblock())
+
+            self.bridge2 = self.convblock(self.num_filter * 8 * 2, self.num_filter * 16, act_fnc)
+
+            for i in range(self.n_blocks + 1):
+                self.add_module('conv_up2_' + str(i + 1),
+                                self.upconvblock(self.num_filter * (2 ** (3 - i)) * 2, self.num_filter * (2 ** (3 - i)), act_fnc))
+                self.add_module('conv_joint2_' + str(i + 1),
+                                self.convblock(self.num_filter * (2 ** (3 - i)) * 3, self.num_filter * (2 ** (3 - i)), act_fnc))
+
+            self.conv_end2 = self.convblock(self.num_filter * 1, self.num_filter * 1, act_fnc)
+
+            self.conv_out2 = nn.Sequential(
+                nn.Conv2d(self.num_filter, self.out_dim, kernel_size=3, stride=1, padding=1),
+            )
+
+
+        
+    def convsblocks(self, in_ch,out_ch,act_fn):
+        block = nn.Sequential(
+            nn.Conv2d(in_ch, out_ch, kernel_size=3, stride=1, padding=1),
+            act_fn,
+            nn.Conv2d(out_ch, out_ch, kernel_size=3, stride=1, padding=1),            
+            act_fn,
+            nn.Dropout(p=0.2)
+        )
+        return block
+    
+    def convblock(self, in_ch,out_ch,act_fn):
+        block = nn.Sequential(
+            nn.Conv2d(in_ch, out_ch, kernel_size=3, stride=1, padding=1),
+            act_fn,
+        )
+        return block
+    
+    def upconvblock(self,in_ch,out_ch,act_fn):
+        block = nn.Sequential(
+            nn.Upsample(scale_factor=2, mode='bilinear'),
+            nn.Conv2d(in_ch, out_ch, kernel_size=3, stride=1, padding=1),
+            act_fn,
+        )
+        return block
+    
+    def poolblock(self):
+        pool = nn.MaxPool2d(kernel_size=2, stride=2, padding=0)
+        return pool
+
+
+    def forward(self,x,inp=3,k=1,camind=True,flag_step2=True,camparam=0,foc_dist=0):
+        down1 = []
+        pool_temp = []
+        for j in range(self.n_blocks + 1):
+            down_temp = []
+            for i in range(k):
+                if j > 0:
+                    joint_pool = torch.cat([pool_temp[0], pool_max[0]], dim=1)
+                    pool_temp.pop(0)
+                else:
+                    joint_pool = x[:, inp * i:inp * (i + 1), :, :]
+                
+                conv = self.__getattr__('conv_down_' + str(j+0))(joint_pool)
+                down_temp.append(conv)
+
+                pool = self.__getattr__('pool_' + str(j+0))(conv)
+                pool_temp.append(pool)
+
+                pool = torch.unsqueeze(pool, 2)
+                if i == 0:
+                    pool_all = pool
+                else:
+                    pool_all = torch.cat([pool_all, pool], dim=2)
+            pool_max = torch.max(pool_all, dim=2)
+            down1.append(down_temp)
+
+        bridge = []
+        for i in range(k):
+            join_pool = torch.cat([pool_temp[i], pool_max[0]], dim=1)
+            bridge.append(self.bridge(join_pool))
+
+
+        up_temp = []
+        for j in range(self.n_blocks+2):
+            for i in range(k):
+                if j > 0:
+                    joint_unpool = torch.cat([up_temp[0], down1[self.n_blocks-j+1][i]], dim=1)
+                    up_temp.pop(0)
+                    joint = self.__getattr__('conv_joint_' + str(j + 0))(joint_unpool)
+                else:
+                    joint = bridge[i]
+
+                if j < self.n_blocks+1:
+                    unpool = self.__getattr__('conv_up_' + str(j + 1))(joint)
+                    up_temp.append(unpool)
+                    unpool = torch.unsqueeze(unpool, 2)
+
+                    if i == 0:
+                        unpool_all = unpool
+                    else:
+                        unpool_all = torch.cat([unpool_all, unpool], dim=2)
+                else:
+                    end = self.conv_end(joint)
+                    out_col_blur = self.conv_out_blur(end)
+
+                    if i == 0:
+                        out_blur = out_col_blur
+                    else:
+                        out_blur = torch.cat([out_blur, out_col_blur], dim=1)
+        if(camind):
+            mul=out_blur*camparam
+        else:
+            mul=out_blur
+
+        if flag_step2:
+            down2 = []
+            pool_temp = []
+            for j in range(self.n_blocks + 1):
+                down_temp = []
+                for i in range(k):
+                    if j > 0:
+                        joint_pool = torch.cat([pool_temp[0], pool_max[0]], dim=1)
+                        pool_temp.pop(0)
+                    else:
+                        joint_pool =  torch.cat([mul[:, 1 * i:1 * (i + 1), :, :],foc_dist[:, 1 * i:1 * (i + 1), :, :]], dim=1)
+                    conv = self.__getattr__('conv_down2_' + str(j + 0))(joint_pool)
+                    down_temp.append(conv)
+
+                    pool = self.__getattr__('pool2_' + str(j + 0))(conv)
+                    #print('pool : '+str(pool.shape))
+                    pool_temp.append(pool)
+
+                    pool = torch.unsqueeze(pool, 2)
+                    if i == 0:
+                        pool_all = pool
+                    else:
+                        pool_all = torch.cat([pool_all, pool], dim=2)
+                pool_max = torch.max(pool_all, dim=2)
+                down2.append(down_temp)
+
+            bridge = []
+            for i in range(k):
+                join_pool = torch.cat([pool_temp[i], pool_max[0]], dim=1)
+                bridge.append(self.bridge2(join_pool))
+
+            up_temp = []
+            for j in range(self.n_blocks + 1):
+                for i in range(k):
+                    if j > 0:
+                        joint_unpool = torch.cat([up_temp[0], unpool_max[0], down1[self.n_blocks - j + 1][i]], dim=1)
+                        up_temp.pop(0)
+                        joint = self.__getattr__('conv_joint2_' + str(j + 0))(joint_unpool)
+                    else:
+                        joint = bridge[i]
+
+                    if j < self.n_blocks + 1:
+                        unpool = self.__getattr__('conv_up2_' + str(j + 1))(joint)
+                        up_temp.append(unpool)
+                        unpool = torch.unsqueeze(unpool, 2)
+
+                        if i == 0:
+                            unpool_all = unpool
+                        else:
+                            unpool_all = torch.cat([unpool_all, unpool], dim=2)
+                unpool_max = torch.max(unpool_all, dim=2)
+
+            end2 = self.conv_end2(unpool_max[0])
+            out_step2 = self.conv_out2(end2)
+        
+        if flag_step2:
+            return out_step2, out_blur,mul
+        else:
+            return out_blur,mul

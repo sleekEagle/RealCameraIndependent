@@ -46,15 +46,6 @@ def stratified_subset(rows, fold, n, seed=0):
     return out
 
 
-def focus_table(path=FOCUS_CSV):
-    """(scene, fl_mm, side) -> focus distance in metres; empty if the file is missing."""
-    if not path.exists():
-        print(f"no focus file {path}: blur bins skipped")
-        return {}
-    return {(int(r["scene"]), int(r["fl_mm"]), r["side"]): float(r["d_focus"])
-            for r in csv.DictReader(open(path)) if r["status"] == "ok"}
-
-
 def blur_map(depth, row, focus):
     """Blur-circle diameter in rectified pixels from the true depth (thin lens):
     fx * (f / N) * |1/d - 1/s|, with f the real lens focal length, N the F-number, s the focus distance."""
@@ -125,7 +116,9 @@ def main(argv=None):
     if a.ckpt:
         models.set_trainable(model, 0)  # only to make all params frozen; the checkpoint restores weights
         load_trainable(model, a.ckpt)
-    focus = focus_table()
+    focus = data.focus_table()
+    if not focus:
+        print(f"no focus file {FOCUS_CSV}: blur bins skipped")
     ds = data.EvalCrops(rows, a.crop, a.crops)
     dl = DataLoader(ds, batch_size=a.crops, num_workers=a.workers, collate_fn=data.collate)
 
@@ -135,7 +128,7 @@ def main(argv=None):
         if b is None:
             continue
         with torch.no_grad(), autocast_ctx():
-            pred = model(b["image"].cuda(non_blocking=True), b["K"].cuda(non_blocking=True))
+            pred = models.predict(model, b)
         pred = pred.float().cpu()
         blur = torch.stack([blur_map(d, rows[i], focus) for d, i in zip(b["depth"], b["row_index"])])
         bins = blur_binned_absrel(pred, b["depth"], blur, BLUR_BINS)
