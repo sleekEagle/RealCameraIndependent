@@ -290,9 +290,9 @@ def walk_dir_calibrate(camera_dir, config, out_dir, report_path=None, ext="JPG",
         )
 
 
-CAMERA_DIR = r"C:\Users\lahir\MODEST\Global_calibration_set\MODEST_ChArUco\Global_calibration_set\ChArUco_pattern\EOS_6D_B"
-OUT_DIR = r"C:\Users\lahir\MODEST\Global_calibration_set\MODEST_ChArUco\Global_calibration_set\ChArUco_pattern\EOS_6D_B\calibration"
-DEBUG_DIR = r"C:\Users\lahir\MODEST\Global_calibration_set\MODEST_ChArUco\Global_calibration_set\ChArUco_pattern\debug"
+CAMERA_DIR = r"D:\datasets\MODEST\Global_calibration_set\MODEST_ChArUco\Global_calibration_set\ChArUco_pattern\EOS_6D_B"
+OUT_DIR = r"D:\datasets\MODEST\Global_calibration_set\MODEST_ChArUco\Global_calibration_set\ChArUco_pattern\EOS_6D_B\calibration"
+DEBUG_DIR = r"D:\datasets\MODEST\Global_calibration_set\MODEST_ChArUco\Global_calibration_set\ChArUco_pattern\debug"
 EXT = "JPG"
 OUTLIER_THRESHOLD = 1.7
 RESIZE_FACTOR = 1.0

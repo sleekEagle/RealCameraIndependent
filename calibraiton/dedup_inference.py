@@ -30,10 +30,10 @@ import shutil
 import cv2
 import numpy as np
 
-SCENE_DIR = r"C:\Users\lahir\MODEST\Scene4\Scene4"
+SCENE_DIR = r"D:\datasets\MODEST\Scene4\Scene4"
 RIGHT_DIR = os.path.join(SCENE_DIR, "EOS6D_A_Right")
 LEFT_DIR = os.path.join(SCENE_DIR, "EOS6D_B_Left")
-OUT_SCENE_DIR = r"C:\Users\lahir\MODEST\Scene4_dedup\Scene4"
+OUT_SCENE_DIR = r"D:\datasets\MODEST\Scene4_dedup\Scene4"
 
 EXT = "JPG"
 THUMB_SIZE = (128, 128)

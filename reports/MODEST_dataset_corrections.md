@@ -5,7 +5,7 @@ Last updated: 2026-10-07
 This report lists every correction and filtering step applied to the original MODEST data, from the raw photos to the manifest used for training. It explains what was wrong, how it was found, what was done, and what is still open.
 
 More detail on some steps is in three separate reports:
-- `C:\Users\lahir\MODEST\STEREO_CALIBRATION_REPORT.md`: stereo pairing and calibration fixes.
+- `D:\datasets\MODEST\STEREO_CALIBRATION_REPORT.md`: stereo pairing and calibration fixes.
 - `D:\datasets\MODEST_dedup\INFERENCE_DEDUP_REPORT.md`: building the de-duplicated inference set.
 - `D:\datasets\MODEST_calibration\RECTIFICATION_FIX_REPORT.md`: the rectification fix.
 
@@ -84,9 +84,9 @@ Pairing by file number was tried first and rejected. The number offset between t
 3. **Folder counts:** after a move, each F16 inference folder must have as many images as the other apertures, in both cameras.
 4. **Checkerboard check:** every moved image was checked for a visible checkerboard, by the detector and by eye where the detector failed.
 
-**What was done:** 237 files were moved to the correct folder in the raw data (`C:\Users\lahir\MODEST`). A first version of the rule also moved 68 F16 scene photos without a checkerboard into `calibration`. Step 4 caught this, and they were moved back.
+**What was done:** 237 files were moved to the correct folder in the raw data (`D:\datasets\MODEST`). A first version of the rule also moved 68 F16 scene photos without a checkerboard into `calibration`. Step 4 caught this, and they were moved back.
 
-**Record:** every move, including the reverted ones, is in `C:\Users\lahir\MODEST\moved_calibration_files.log`.
+**Record:** every move, including the reverted ones, is in `D:\datasets\MODEST\moved_calibration_files.log`.
 
 **Left as is (not filing errors):** extra or repeated shots inside the inference cycle (Scene 2 65 mm, Scene 8 65 mm, Scene 5 50/65 mm), and two F2.8 test shots before calibration in Scene 2 at 65 mm.
 
@@ -268,8 +268,8 @@ A **view** is one camera position and scene arrangement, shot at all five F-numb
 
 | File or folder | What it is |
 |---|---|
-| `C:\Users\lahir\MODEST` | Raw data, with the folder corrections of section 3 |
-| `C:\Users\lahir\MODEST\moved_calibration_files.log` | Every file move in the raw data |
+| `D:\datasets\MODEST` | Raw data, with the folder corrections of section 3 |
+| `D:\datasets\MODEST\moved_calibration_files.log` | Every file move in the raw data |
 | `D:\datasets\MODEST_dedup` | De-duplicated inference pairs; `pairs_manifest.csv`, `dedup_summary.txt` |
 | `D:\datasets\MODEST_calibration` | Calibration pairs, `stereo_calibration\` (original) and `stereo_calibration_v2\` (fixed); `refine_rectification_report.csv` |
 | `D:\datasets\modest_stereo_calib_v2` | Small copies of the v2 calibrations without remap tables (for Kaggle) |

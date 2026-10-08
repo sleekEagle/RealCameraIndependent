@@ -372,9 +372,9 @@ def extract_depth_v_blur():
     """Single-focal-length smoke test: process_focal_length() on one hardcoded fl_XXmm folder
     (EOS_6D_A/fl_32mm). See run_all_esf_extraction() to process every camera/focal length."""
     process_focal_length(
-        Path(r"C:\Users\lahir\MODEST\Global_calibration_set\MODEST_ChArUco"
+        Path(r"D:\datasets\MODEST\Global_calibration_set\MODEST_ChArUco"
              r"\Global_calibration_set\ChArUco_pattern\EOS_6D_A\fl_32mm"),
-        Path(r"C:\Users\lahir\MODEST\Global_calibration_set\MODEST_ChArUco"
+        Path(r"D:\datasets\MODEST\Global_calibration_set\MODEST_ChArUco"
              r"\Global_calibration_set\ChArUco_pattern\EOS_6D_A\debug"),
     )
 
@@ -387,7 +387,7 @@ def run_all_esf_extraction():
     EOS_6D_B (R), writing each camera's widths CSVs to its own debug/ subfolder. Skips any
     (camera, focal length) whose widths CSV already exists, so this is safe to re-run after
     only some of the cameras/focal lengths have been processed."""
-    calib_root = Path(r"C:\Users\lahir\MODEST\Global_calibration_set\MODEST_ChArUco"
+    calib_root = Path(r"D:\datasets\MODEST\Global_calibration_set\MODEST_ChArUco"
                        r"\Global_calibration_set\ChArUco_pattern")
 
     for side, cam_name in CAMERA_DIRS.items():
@@ -594,7 +594,7 @@ def fit_k_gamma_pooled(settings, n_bins: int = 40, min_bin_samples: int = 20):
     }
 
 
-CALIB_ROOT = Path(r"C:\Users\lahir\MODEST\Global_calibration_set\MODEST_ChArUco"
+CALIB_ROOT = Path(r"D:\datasets\MODEST\Global_calibration_set\MODEST_ChArUco"
                    r"\Global_calibration_set\ChArUco_pattern")
 DFOCUS_PATH = Path(r"D:\datasets\MODEST_processed\scene4_dfocus\dfocus_results.txt")
 OUT_DIR = Path(r"D:\datasets\MODEST_processed\global_def_calib")

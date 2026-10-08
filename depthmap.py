@@ -94,10 +94,10 @@ def colorize(arr, mask=None, cmap=cv2.COLORMAP_JET):
 
 
 def main():
-    right_img = r"C:\Users\lahir\MODEST\Scene4\Scene4\EOS6D_A_Right\fl_28mm\inference\F5.0\IMG_0678.JPG"
-    left_img = r"C:\Users\lahir\MODEST\Scene4\Scene4\EOS6D_B_Left\fl_28mm\inference\F5.0\IMG_1601.JPG"
-    calib = r"C:\Users\lahir\MODEST\calibrtion\scene4.npz"
-    out_dir = r'C:\Users\lahir\MODEST\depth'
+    right_img = r"D:\datasets\MODEST\Scene4\Scene4\EOS6D_A_Right\fl_28mm\inference\F5.0\IMG_0678.JPG"
+    left_img = r"D:\datasets\MODEST\Scene4\Scene4\EOS6D_B_Left\fl_28mm\inference\F5.0\IMG_1601.JPG"
+    calib = r"D:\datasets\MODEST\calibrtion\scene4.npz"
+    out_dir = r'D:\datasets\MODEST\depth'
     num_disparities = 128
     block_size = 5
     min_depth = None #"Optional: clip depths below this (same unit as calibration)"
@@ -194,7 +194,7 @@ def rectify_img(img_path_l, img_path_r, calib):
 
 
 if __name__ == "__main__":
-    intr = get_intrinsic(r"C:\Users\lahir\MODEST\calibrtion\scene4.npz")
-    rectify_img(r"C:\Users\lahir\MODEST\Scene4\Scene4\EOS6D_B_Left\fl_28mm\inference\F2.8\IMG_1596.JPG",
-                r"C:\Users\lahir\MODEST\Scene4\Scene4\EOS6D_A_Right\fl_28mm\inference\F2.8\IMG_0673.JPG",
+    intr = get_intrinsic(r"D:\datasets\MODEST\calibrtion\scene4.npz")
+    rectify_img(r"D:\datasets\MODEST\Scene4\Scene4\EOS6D_B_Left\fl_28mm\inference\F2.8\IMG_1596.JPG",
+                r"D:\datasets\MODEST\Scene4\Scene4\EOS6D_A_Right\fl_28mm\inference\F2.8\IMG_0673.JPG",
                 intr)

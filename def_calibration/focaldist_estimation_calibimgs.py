@@ -50,7 +50,7 @@ from PIL import Image
 from scipy import ndimage
 from scipy.optimize import curve_fit
 
-CALIB_ROOT = (r"C:\Users\lahir\MODEST\Global_calibration_set\MODEST_ChArUco"
+CALIB_ROOT = (r"D:\datasets\MODEST\Global_calibration_set\MODEST_ChArUco"
               r"\Global_calibration_set\ChArUco_pattern")
 CAMERA_DIRS = {"L": "EOS_6D_A", "R": "EOS_6D_B"}
 

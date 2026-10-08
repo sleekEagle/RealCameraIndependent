@@ -362,7 +362,7 @@ def stereo_calibrate_fl(fl_name, right_dir, left_dir, intrinsics_right_dir, intr
         print(f"Appended report entry to {report_path}")
 
 
-MODEST_DIR = r"C:\Users\lahir\MODEST"
+MODEST_DIR = r"D:\datasets\MODEST"
 SCENES = ["Scene2", "Scene3", "Scene5", "Scene6", "Scene7", "Scene8", "Scene9"]
 INTRINSICS_ROOT = os.path.join(
     MODEST_DIR, "Global_calibration_set", "MODEST_ChArUco", "Global_calibration_set", "ChArUco_pattern"

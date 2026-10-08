@@ -146,7 +146,7 @@ def verify_report(report_path, camera_dir, config, ext="JPG"):
         pass
 
 
-CAMERA_DIR = r"C:\Users\lahir\MODEST\Global_calibration_set\MODEST_ChArUco\Global_calibration_set\ChArUco_pattern\EOS_6D_A"
+CAMERA_DIR = r"D:\datasets\MODEST\Global_calibration_set\MODEST_ChArUco\Global_calibration_set\ChArUco_pattern\EOS_6D_A"
 REPORT_PATH = os.path.join(CAMERA_DIR, "monocal_report_EOS_6D_A.txt")
 EXT = "JPG"
 

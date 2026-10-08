@@ -46,7 +46,7 @@ from PIL import Image
 
 from stereo_calibration import PAIR_TIME_TOL_S, camera_dir, capture_time
 
-MODEST_DIR = r"C:\Users\lahir\MODEST"
+MODEST_DIR = r"D:\datasets\MODEST"
 OUT_ROOT = r"D:\datasets\MODEST_dedup"
 SCENES = [
     "Scene1", "Scene2", "Scene3", os.path.join("Scene4", "Scene4"), "Scene5",

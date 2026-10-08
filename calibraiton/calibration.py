@@ -247,12 +247,12 @@ def est_depth_error():
     
 if __name__ == "__main__":
     est_depth_error()
-    # left_dir = r'C:\Users\lahir\MODEST\Scene4\Scene4\EOS6D_B_Left\fl_28mm\calibration'
-    # right_dir = r'C:\Users\lahir\MODEST\Scene4\Scene4\EOS6D_A_Right\fl_28mm\calibration'
-    # debug_dir = r'C:\Users\lahir\MODEST\debug' # Optional folder for corner/rectification visualizations
-    # out_dir = r'C:\Users\lahir\MODEST\calibrtion\scene4'
+    # left_dir = r'D:\datasets\MODEST\Scene4\Scene4\EOS6D_B_Left\fl_28mm\calibration'
+    # right_dir = r'D:\datasets\MODEST\Scene4\Scene4\EOS6D_A_Right\fl_28mm\calibration'
+    # debug_dir = r'D:\datasets\MODEST\debug' # Optional folder for corner/rectification visualizations
+    # out_dir = r'D:\datasets\MODEST\calibrtion\scene4'
 
-    # walk_dir_calibrate(r'C:\Users\lahir\MODEST\Scene4\Scene4')
+    # walk_dir_calibrate(r'D:\datasets\MODEST\Scene4\Scene4')
 
     # square(left_dir, right_dir, debug_dir, out_dir)
 

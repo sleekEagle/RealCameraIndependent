@@ -30,7 +30,7 @@ import sys
 import cv2
 import numpy as np
 
-SCENE_DIR = sys.argv[1] if len(sys.argv) > 1 else r"C:\Users\lahir\MODEST\Scene4_dedup\Scene4"
+SCENE_DIR = sys.argv[1] if len(sys.argv) > 1 else r"D:\datasets\MODEST\Scene4_dedup\Scene4"
 RIGHT_DIR = os.path.join(SCENE_DIR, "EOS6D_A_Right")
 LEFT_DIR = os.path.join(SCENE_DIR, "EOS6D_B_Left")
 
