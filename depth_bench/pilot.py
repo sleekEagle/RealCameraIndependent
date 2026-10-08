@@ -67,7 +67,7 @@ def main():
             print(f"   fine-tuning {m} failed:\n" + out[-2000:], flush=True)
 
     path = RUNS_DIR / "pilot_summary.csv"
-    cols = ["stage", "model", "fold", "group", "n_crops", "absrel", "absrel_med", "rmse", "delta1", "si_absrel", "scale"]
+    cols = ["stage", "model", "fold", "group", "n_crops", "absrel", "absrel_med", "rmse", "delta1", "delta2", "delta3", "silog", "si_absrel", "scale"]
     done = {m for _, m, _ in results}
     old = [r for r in csv.DictReader(open(path))] if path.exists() else []
     old = [r for r in old if not (r["model"] in done and r.get("fold", a.fold) == a.fold)]  # replace re-run models

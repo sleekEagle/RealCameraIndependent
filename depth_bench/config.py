@@ -16,3 +16,9 @@ TEST_LABELS = ("test_seen", "test_unseenF", "test_unseenfl", "test_both")
 EXTRA_LABELS = ("extra_unseenfl", "extra_both")
 
 MIN_DEPTH, MAX_DEPTH = 0.3, 20.0   # metres; outside this range a pixel is not used
+
+# Focus distance per (scene, focal length, camera side), from def_calibration/focus_from_aperture_pairs.py.
+# Used only for the blur-binned evaluation; if the file is missing, blur bins are skipped.
+FOCUS_CSV = Path(os.environ.get("MODEST_FOCUS_CSV", r"D:\datasets\MODEST_focus\dfocus_aperture_pairs.csv"))
+# Blur-diameter bins in pixels for the blur-binned AbsRel
+BLUR_BINS = (0, 1, 2, 4, 8, 16, 32, 64, float("inf"))
