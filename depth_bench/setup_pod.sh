@@ -64,6 +64,8 @@ mkdir -p $W/MODEST_runs
 cd $W/RealCameraIndependent
 if pgrep -f "depth_bench.run_all" > /dev/null; then echo "run_all is already running"; exit 0; fi
 python -m depth_bench.run_all --dry_run --folds $FOLDS --models $MODELS --zero_shot $ZERO_SHOT
-nohup python -m depth_bench.run_all --folds $FOLDS --models $MODELS --zero_shot $ZERO_SHOT \
+# --clear_locks: a pod stop/restart can leave lock files of jobs that were running. Only one run_all
+# runs on this pod (checked above), so they are all stale.
+nohup python -m depth_bench.run_all --folds $FOLDS --models $MODELS --zero_shot $ZERO_SHOT --clear_locks \
       >> $W/MODEST_runs/run_all.log 2>&1 &
 echo "started (pid $!). Follow with:  tail -f $W/MODEST_runs/run_all.log"
