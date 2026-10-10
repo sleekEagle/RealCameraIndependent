@@ -14,12 +14,17 @@ Example (depthbench env):
     python -m depth_bench.finetune --model da3 --fold S1 --samples 40000 --batch 2 --accum 8
 Writes <RUNS_DIR>/finetune/<model>_<fold>[_<tag>]/ : last.pt, best.pt, log.csv, config.json,
 and done.json when finished.
+
+Time limit (e.g. Kaggle's 12 h sessions): if DEPTH_BENCH_DEADLINE (unix time) is set, training saves
+last.pt and exits with code 75 once that time is reached; the next run resumes from last.pt.
 """
 import argparse
 import csv
 import json
 import math
+import os
 import random
+import sys
 import time
 
 import numpy as np
@@ -49,6 +54,10 @@ def set_train_mode(model):
     model.eval()
     for m in model.head_modules():
         m.train()
+
+
+EXIT_TIME_LIMIT = 75
+DEADLINE = float(os.environ.get("DEPTH_BENCH_DEADLINE", 0))
 
 
 def main(argv=None):
@@ -111,6 +120,8 @@ def main(argv=None):
                                f"mixed precision: {amp_dtype()})")
         print(f"step 0 ({'zero-shot' if getattr(model, 'pretrained', True) else 'random init'}) val AbsRel {best:.4f}", flush=True)
         log_rows.append({"step": 0, "loss": "", "val_absrel": best, "time_s": 0})
+        # if training never beats the starting weights, these are the best ones (else best.pt is missing)
+        torch.save({"model": trainable_state(model), "step": 0, "val_absrel": best}, run / "best.pt")
 
     it = iter(train_dl)
     t0 = time.time()
@@ -137,6 +148,17 @@ def main(argv=None):
         scaler.step(opt)
         scaler.update()
         step += 1
+        if DEADLINE and time.time() > DEADLINE and step < steps:
+            torch.save({"model": trainable_state(model), "opt": opt.state_dict(), "step": step, "best": best},
+                       run / "last.pt")
+            if log_rows:
+                with open(run / "log.csv", "a", newline="") as f:
+                    w = csv.DictWriter(f, fieldnames=["step", "loss", "val_absrel", "time_s"])
+                    if f.tell() == 0:
+                        w.writeheader()
+                    w.writerows(log_rows)
+            print(f"time limit reached: saved last.pt at step {step}/{steps}; re-run to resume", flush=True)
+            sys.exit(EXIT_TIME_LIMIT)
         if not all(math.isfinite(x) for x in run_loss[-a.accum:]):
             bad += 1  # fp16 loss scaling may skip a few steps; a long run of them means overflow
             if bad >= 20:

@@ -72,6 +72,15 @@ python -m depth_bench.evaluate --model da3 --fold S1 --ckpt <RUNS>/finetune/da3_
 python -m depth_bench.pilot
 ```
 
+## Full benchmark on Kaggle
+
+1. Locally: `python -m depth_bench.pack_for_colab` (writes `D:\datasets\MODEST_colab`, 36 GB). Upload it as a private Kaggle dataset, e.g. with the Kaggle CLI: `kaggle datasets init -p D:\datasets\MODEST_colab`, set the title and id in the created `dataset-metadata.json`, then `kaggle datasets create -p D:\datasets\MODEST_colab`.
+2. Import `depth_bench/kaggle_run.ipynb` into Kaggle. Settings: GPU T4 x2, Internet on; add the dataset as input.
+3. Each session: **Save Version → Save & Run All (Commit)**. It runs up to 12 h without the browser. One `run_all` process per T4; they share the jobs through lock files (`MODEST_runs/locks/`). Training stops 10 min before the session limit and saves `last.pt`; results go to the version's output (`/kaggle/working/MODEST_runs`, limit 20 GB; `last.pt` of finished runs is deleted).
+4. From the 2nd session on, add the previous version's output as an input; the notebook copies the runs so far from it and continues.
+
+`kaggle_data.py` prepares the data in the notebook: it extracts the tars to local disk, or, if Kaggle unpacked them on upload, links the scene folders.
+
 ## Full benchmark on RunPod
 
 1. Locally: `python -m depth_bench.pack_for_colab` (writes `D:\datasets\MODEST_colab`, 36 GB).
