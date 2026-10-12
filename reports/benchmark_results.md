@@ -7,7 +7,7 @@ This report gives the results of the full benchmark on MODEST: four pretrained m
 1. How well do current models handle our camera settings out of the box (zero-shot)?
 2. After training on some camera settings, how much worse are they on settings they have not seen?
 
-The split design is in `dataset_splits.md`. Tables and figures are in `reports/benchmark/`. All of them are made by `python -m depth_bench.analyze --runs <MODEST_runs> --out reports/benchmark`.
+The split design is in `dataset_splits.md`. Tables and figures are in `reports/benchmark/`. All of them are made by `python -m depth_bench.analyze --runs D:\datasets\MODEST_out\MODEST_runs_results\MODEST_runs --out reports/benchmark`.
 
 ## 1. Summary
 
@@ -193,4 +193,5 @@ The pretrained models reach their best near the end of training. A longer budget
 | `reports/benchmark/table_blur.csv` | AbsRel per blur bin |
 | `reports/benchmark/table_zs_scale_by_focal.csv`, `table_bf1_by_fnumber.csv`, `table_training.csv` | zero-shot scale, boundary F1, training summary |
 | `reports/benchmark/fig_*.png` | figures in this report |
-| raw results | `MODEST_runs` from RunPod (`eval/*/per_crop.csv`, `summary.csv`, `blur_summary.csv`; checkpoints in `finetune/*/best.pt`) |
+| `D:\datasets\MODEST_out\MODEST_runs_results\MODEST_runs` | raw results from RunPod: `eval/*/per_crop.csv`, `summary.csv`, `blur_summary.csv`; `finetune/*/log.csv`, `config.json`, `done.json`; `logs/` |
+| `D:\datasets\MODEST_out\MODEST_runs_checkpoints\MODEST_runsinetune` | trained weights, `<model>_<fold>/best.pt` (25 files, 5.3 GB; trained modules only, load with `train_utils.load_trainable`) |
