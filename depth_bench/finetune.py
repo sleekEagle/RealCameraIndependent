@@ -72,6 +72,9 @@ def main(argv=None):
     ap.add_argument("--unfreeze", type=float, default=0.25, help="fraction of encoder blocks to train")
     ap.add_argument("--warmup", type=float, default=0.05)
     ap.add_argument("--crop", type=int, default=518)
+    ap.add_argument("--resize", type=int, default=0,
+                    help="train on whole images resized to this short side (px); 0 = native crops. "
+                         "Each sample is then one resized image; validation uses resized images too")
     ap.add_argument("--val_every", type=int, default=250, help="optimizer steps between validations")
     ap.add_argument("--val_images", type=int, default=120)
     ap.add_argument("--val_crops", type=int, default=2)
@@ -81,7 +84,8 @@ def main(argv=None):
     a = ap.parse_args(argv)
 
     torch.manual_seed(a.seed); random.seed(a.seed); np.random.seed(a.seed)
-    run = RUNS_DIR / "finetune" / f"{a.model}_{a.fold}{'_' + a.tag if a.tag else ''}"
+    run = RUNS_DIR / "finetune" / (f"{a.model}_{a.fold}" + (f"_r{a.resize}" if a.resize else "")
+                                   + (f"_{a.tag}" if a.tag else ""))
     run.mkdir(parents=True, exist_ok=True)
     (run / "config.json").write_text(json.dumps(vars(a), indent=1))
 
@@ -109,10 +113,15 @@ def main(argv=None):
         step, best = ck["step"], ck["best"]
         print(f"resumed at step {step} (best val {best:.4f})", flush=True)
 
-    train_dl = DataLoader(data.TrainCrops(train_rows, a.crop, seed=a.seed + step), batch_size=a.batch,
-                          num_workers=a.workers, collate_fn=data.collate, persistent_workers=a.workers > 0)
-    val_dl = DataLoader(data.EvalCrops(val_rows, a.crop, a.val_crops), batch_size=a.val_crops,
-                        num_workers=min(2, a.workers), collate_fn=data.collate)
+    if a.resize:
+        train_ds = data.TrainResized(train_rows, a.resize, seed=a.seed + step)
+        val_ds, val_bs = data.ValResized(val_rows, a.resize), 2
+    else:
+        train_ds = data.TrainCrops(train_rows, a.crop, seed=a.seed + step)
+        val_ds, val_bs = data.EvalCrops(val_rows, a.crop, a.val_crops), a.val_crops
+    train_dl = DataLoader(train_ds, batch_size=a.batch, num_workers=a.workers, collate_fn=data.collate,
+                          persistent_workers=a.workers > 0)
+    val_dl = DataLoader(val_ds, batch_size=val_bs, num_workers=min(2, a.workers), collate_fn=data.collate)
     if step == 0:
         best = validate(model, val_dl)
         if not math.isfinite(best):

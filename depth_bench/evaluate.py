@@ -100,6 +100,9 @@ def main(argv=None):
     ap.add_argument("--crops", type=int, default=6, help="fixed crops per image")
     ap.add_argument("--max_images", type=int, help="stratified subset (needs --fold) for quick runs")
     ap.add_argument("--workers", type=int, default=2)
+    ap.add_argument("--resize", type=int, default=0,
+                    help="short side (px) of the resized whole image the model sees; 0 = native crops. The "
+                         "prediction is upsampled to full resolution and scored in the same crop windows")
     a = ap.parse_args(argv)
 
     rows = data.read_manifest()
@@ -119,21 +122,41 @@ def main(argv=None):
     focus = data.focus_table()
     if not focus:
         print(f"no focus file {FOCUS_CSV}: blur bins skipped")
-    ds = data.EvalCrops(rows, a.crop, a.crops)
-    dl = DataLoader(ds, batch_size=a.crops, num_workers=a.workers, collate_fn=data.collate)
+    def native_batches():
+        dl = DataLoader(data.EvalCrops(rows, a.crop, a.crops), batch_size=a.crops, num_workers=a.workers,
+                        collate_fn=data.collate)
+        for b in dl:
+            if b is None:
+                continue
+            with torch.no_grad(), autocast_ctx():
+                pred = models.predict(model, b)
+            yield pred.float().cpu(), b["depth"], b["row_index"], b["crop_index"]
+
+    def resized_batches():
+        dl = DataLoader(data.EvalResized(rows, a.resize, a.crop, a.crops), batch_size=None,
+                        num_workers=a.workers)
+        for it in dl:
+            if not it["positions"]:
+                continue
+            b = {k: it[k][None] for k in ("image", "K", "cam")}
+            with torch.no_grad(), autocast_ctx():
+                pred = models.predict(model, b)
+            full = it["depth_full"]
+            pred = torch.nn.functional.interpolate(pred.float()[:, None], size=full.shape, mode="bilinear",
+                                                   align_corners=False)[0, 0]
+            c = a.crop
+            crops = [(x0, y0) for x0, y0 in it["positions"]]
+            yield (torch.stack([pred[y:y + c, x:x + c] for x, y in crops]).cpu(),
+                   torch.stack([full[y:y + c, x:x + c] for x, y in crops]),
+                   [it["row_index"]] * len(crops), list(range(len(crops))))
 
     keep = ["color_path", "scene", "fl_mm", "f_number", "side", "view_id", "f_true_mm", "rect_turn_deg", *FOLDS]
     per_crop, t0 = [], time.time()
-    for bi, b in enumerate(dl):
-        if b is None:
-            continue
-        with torch.no_grad(), autocast_ctx():
-            pred = models.predict(model, b)
-        pred = pred.float().cpu()
-        blur = torch.stack([blur_map(d, rows[i], focus) for d, i in zip(b["depth"], b["row_index"])])
-        bins = blur_binned_absrel(pred, b["depth"], blur, BLUR_BINS)
-        for m, bb, c, pr, gt, i, j in zip(depth_metrics(pred, b["depth"]), bins, blur, pred, b["depth"],
-                                          b["row_index"], b["crop_index"]):
+    for bi, (pred, depth, row_index, crop_index) in enumerate(resized_batches() if a.resize else native_batches()):
+        # blur is computed in full-resolution pixels in both settings (from row["fx"])
+        blur = torch.stack([blur_map(d, rows[i], focus) for d, i in zip(depth, row_index)])
+        bins = blur_binned_absrel(pred, depth, blur, BLUR_BINS)
+        for m, bb, c, pr, gt, i, j in zip(depth_metrics(pred, depth), bins, blur, pred, depth, row_index, crop_index):
             r = {**{k: rows[i][k] for k in keep}, "crop_index": j, **m}
             if "absrel" in m:
                 r.update(boundary_f1_si(pr.numpy(), gt.numpy()))

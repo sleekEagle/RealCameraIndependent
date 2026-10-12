@@ -1,8 +1,14 @@
 """
 MODEST_depth data: manifest rows, native-resolution crops, crop-adjusted intrinsics.
 
-No resizing anywhere: resizing would shrink the defocus blur, which this study is about.
+Main setting: no resizing (resizing shrinks the defocus blur, which this study is about).
 A crop keeps the focal length (fx, fy) and moves the principal point by the crop offset.
+
+Resized setting (for comparison, TrainResized / EvalResized): the whole image is shrunk to a short
+side of `short` px (518 -> 777 x 518) with area averaging, like a lower-resolution camera; the
+depth for training is shrunk with nearest-neighbour sampling (no mixing of depths across edges);
+the intrinsics are scaled by the same factor. Evaluation upsamples the prediction back to full
+resolution and scores it in the same fixed crop windows as the native setting.
 """
 import csv
 import hashlib
@@ -180,6 +186,97 @@ class TrainCrops(IterableDataset):
             buf.append(s)
             if len(buf) >= self.buffer:
                 yield buf.pop(rng.randrange(len(buf)))
+
+
+def resize_intrinsics(row, s, flip=False, width=None):
+    """K of the image scaled by s (pixel centres: x' = (x + 0.5) s - 0.5)."""
+    fx, fy, cx, cy = (float(row[k]) for k in ("fx", "fy", "cx", "cy"))
+    fx, fy, cx, cy = fx * s, fy * s, (cx + 0.5) * s - 0.5, (cy + 0.5) * s - 0.5
+    if flip:
+        cx = width - 1 - cx
+    return np.array([[fx, 0, cx], [0, fy, cy], [0, 0, 1]], np.float32)
+
+
+def resize_image(img, short):
+    """Whole image shrunk so the short side is `short` px (area averaging); returns image, scale."""
+    H, W = img.shape[:2]
+    s = short / min(H, W)
+    size = (int(round(W * s)), int(round(H * s)))
+    return cv2.resize(img, size, interpolation=cv2.INTER_AREA), s
+
+
+class TrainResized(IterableDataset):
+    """Endless stream of whole resized training images (flip + brightness/contrast jitter)."""
+
+    def __init__(self, rows, short=518, flip=True, jitter=0.1, buffer=16, seed=0):
+        self.rows, self.short, self.flip, self.jitter, self.buffer, self.seed = rows, short, flip, jitter, buffer, seed
+
+    def _samples(self, rng):
+        while True:
+            row = self.rows[rng.randrange(len(self.rows))]
+            img, depth = load_pair(row)
+            im, s = resize_image(img, self.short)
+            h, w = im.shape[:2]
+            d = cv2.resize(depth, (w, h), interpolation=cv2.INTER_NEAREST)
+            flip = self.flip and rng.random() < 0.5
+            if flip:
+                im, d = im[:, ::-1], d[:, ::-1]
+            image = torch.from_numpy(np.ascontiguousarray(im)).permute(2, 0, 1).float() / 255.0
+            if self.jitter:
+                a = 1 + rng.uniform(-self.jitter, self.jitter)
+                b = rng.uniform(-self.jitter, self.jitter) / 2
+                image = (image * a + b).clamp(0, 1)
+            yield {"image": image, "depth": torch.from_numpy(np.ascontiguousarray(d)),
+                   "K": torch.from_numpy(resize_intrinsics(row, s, flip, w)), "cam": camera(row)}
+
+    def __iter__(self):
+        wi = get_worker_info()
+        rng = random.Random(self.seed + (wi.id if wi else 0) * 1000 + random.randrange(1 << 20))
+        buf = []
+        for x in self._samples(rng):
+            buf.append(x)
+            if len(buf) >= self.buffer:
+                yield buf.pop(rng.randrange(len(buf)))
+
+
+class ValResized(Dataset):
+    """Whole resized images with resized (nearest) depth: cheap validation for checkpoint selection."""
+
+    def __init__(self, rows, short=518):
+        self.rows, self.short = rows, short
+
+    def __len__(self):
+        return len(self.rows)
+
+    def __getitem__(self, i):
+        row = self.rows[i]
+        img, depth = load_pair(row)
+        im, s = resize_image(img, self.short)
+        h, w = im.shape[:2]
+        d = cv2.resize(depth, (w, h), interpolation=cv2.INTER_NEAREST)
+        return {"image": torch.from_numpy(np.ascontiguousarray(im)).permute(2, 0, 1).float() / 255.0,
+                "depth": torch.from_numpy(d), "K": torch.from_numpy(resize_intrinsics(row, s)), "cam": camera(row)}
+
+
+class EvalResized(Dataset):
+    """One item per test image: the resized image and K, plus the full-resolution depth and the
+    fixed crop positions (same as EvalCrops), so the upsampled prediction can be scored in the same
+    windows as the native-resolution evaluation. Use batch_size=1."""
+
+    def __init__(self, rows, short=518, crop=518, crops_per_image=6):
+        self.rows, self.short, self.crop, self.n = rows, short, crop, crops_per_image
+
+    def __len__(self):
+        return len(self.rows)
+
+    def __getitem__(self, i):
+        row = self.rows[i]
+        img, depth = load_pair(row)
+        im, s = resize_image(img, self.short)
+        return {"image": torch.from_numpy(np.ascontiguousarray(im)).permute(2, 0, 1).float() / 255.0,
+                "K": torch.from_numpy(resize_intrinsics(row, s)), "cam": camera(row),
+                "depth_full": torch.from_numpy(depth), "row_index": i,
+                "positions": eval_crop_positions(row, depth, self.crop, self.n)}
 
 
 def collate(batch):

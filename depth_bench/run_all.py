@@ -103,9 +103,17 @@ def main(argv=None):
     ap.add_argument("--hours", type=float, default=0, help="session time limit in hours (0 = none)")
     ap.add_argument("--keep_last", action="store_true", help="keep last.pt of finished runs (default: delete)")
     ap.add_argument("--clear_locks", action="store_true", help="remove locks of a previous (killed) session")
+    ap.add_argument("--resize", type=int, default=0,
+                    help="resized setting: whole images with this short side (px), e.g. 518; 0 = native crops. "
+                         "Results get the suffix _r<size>")
     ap.add_argument("--dry_run", action="store_true")
     a = ap.parse_args(argv)
     ev = ["--crops", str(a.crops), "--workers", str(a.workers)]
+    sfx = f"_r{a.resize}" if a.resize else ""
+    if a.resize:
+        ev += ["--resize", str(a.resize)]
+        # resized focal lengths (646-1713 px) suit Metric3D's official canonical focal of 1000 px
+        TRAIN["metric3d"] = "metric3d"
     t0 = time.time()
     if a.hours:
         # training stops 10 min before the limit, to leave time for saving
@@ -121,10 +129,11 @@ def main(argv=None):
     jobs += [("train", name, fold) for fold in a.folds for name in a.models]
     for kind, name, fold in jobs:
         if kind == "zs":
-            job, ev_dir = f"zs_{name}", RUNS_DIR / "eval" / f"zs_{name}"
+            job, ev_dir = f"zs_{name}{sfx}", RUNS_DIR / "eval" / f"zs_{name}{sfx}"
         else:
             m = TRAIN[name]
-            job, ev_dir, rd = f"{m}_{fold}", RUNS_DIR / "eval" / f"ft_{m}_{fold}", RUNS_DIR / "finetune" / f"{m}_{fold}"
+            job = f"{m}_{fold}{sfx}"
+            ev_dir, rd = RUNS_DIR / "eval" / f"ft_{job}", RUNS_DIR / "finetune" / job
         if (ev_dir / "summary.csv").exists():
             print(f"{job}: done")
             continue
@@ -142,7 +151,7 @@ def main(argv=None):
                 continue
             if not (rd / "done.json").exists():
                 scratch = name in SCRATCH
-                tr = ["depth_bench.finetune", "--model", m, "--fold", fold,
+                tr = ["depth_bench.finetune", "--model", m, "--fold", fold, "--resize", str(a.resize),
                       "--samples", str(a.scratch_samples if scratch else a.ft_samples), "--workers", str(a.workers)]
                 # same 16 crops per optimizer step for all; the small CNN fits 8 per batch
                 batch, accum = (8, 2) if scratch else (2, 8)

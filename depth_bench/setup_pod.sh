@@ -8,6 +8,8 @@
 #   curl -sL https://raw.githubusercontent.com/sleekEagle/RealCameraIndependent/main/depth_bench/setup_pod.sh | bash
 # Options (environment variables), e.g. only some folds or models:
 #   FOLDS="S1 S2" MODELS="da2 camind" ZERO_SHOT=none bash setup_pod.sh
+# Resized setting (whole images, short side 518 px; the 4 pretrained baselines by default):
+#   curl -sL <url above> | RESIZE=518 bash
 #
 # Safe to run again (after a pod restart): finished steps are skipped, training resumes.
 # Everything lives on the volume (/workspace), so it survives stopping the pod.
@@ -17,6 +19,8 @@ set -euo pipefail
 W=/workspace
 DATA_SRC=${DATA_SRC:-$W/MODEST_colab}
 FOLDS=${FOLDS:-"S1 S2 S3 S4 S5"}
+RESIZE=${RESIZE:-0}
+if [ "$RESIZE" != 0 ]; then MODELS=${MODELS:-"da2 unidepth metric3d da3"}; fi
 MODELS=${MODELS:-"da2 unidepth metric3d da3 camind"}
 ZERO_SHOT=${ZERO_SHOT:-"da2 unidepth unidepth_noK metric3d da3"}
 
@@ -63,9 +67,9 @@ export MODEST_DEPTH_ROOT=$W/MODEST_depth MODEST_FOCUS_CSV=$W/dfocus_aperture_pai
 mkdir -p $W/MODEST_runs
 cd $W/RealCameraIndependent
 if pgrep -f "depth_bench.run_all" > /dev/null; then echo "run_all is already running"; exit 0; fi
-python -m depth_bench.run_all --dry_run --folds $FOLDS --models $MODELS --zero_shot $ZERO_SHOT
+python -m depth_bench.run_all --dry_run --folds $FOLDS --models $MODELS --zero_shot $ZERO_SHOT --resize $RESIZE
 # --clear_locks: a pod stop/restart can leave lock files of jobs that were running. Only one run_all
 # runs on this pod (checked above), so they are all stale.
-nohup python -m depth_bench.run_all --folds $FOLDS --models $MODELS --zero_shot $ZERO_SHOT --clear_locks \
+nohup python -m depth_bench.run_all --folds $FOLDS --models $MODELS --zero_shot $ZERO_SHOT --resize $RESIZE --clear_locks \
       >> $W/MODEST_runs/run_all.log 2>&1 &
 echo "started (pid $!). Follow with:  tail -f $W/MODEST_runs/run_all.log"
