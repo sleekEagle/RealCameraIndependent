@@ -20,7 +20,9 @@ import tifffile
 import torch
 from torch.utils.data import Dataset, IterableDataset, get_worker_info
 
-from .config import DEPTH_ROOT, FOCUS_CSV, MANIFEST, MAX_DEPTH, MIN_DEPTH
+from pathlib import Path
+
+from .config import DEPTH_ROOT, FOCUS_CSV, MANIFEST, MAX_DEPTH, MIN_DEPTH, RESIZED_CACHE
 
 
 def read_manifest(path=MANIFEST):
@@ -65,15 +67,24 @@ def _path(rel):
     return DEPTH_ROOT / rel.replace("\\", "/")
 
 
-def load_pair(row):
-    """Full-resolution RGB uint8 (H, W, 3) and depth float32 (H, W, metres, NaN = invalid)."""
+def load_image(row):
+    """Full-resolution RGB uint8 (H, W, 3)."""
     img = cv2.imread(str(_path(row["color_path"])), cv2.IMREAD_COLOR)
     if img is None:
         raise FileNotFoundError(row["color_path"])
-    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+
+
+def load_depth(row):
+    """Full-resolution depth float32 (H, W, metres, NaN = invalid)."""
     depth = tifffile.imread(_path(row["depth_path"])).astype(np.float32)
     depth[~np.isfinite(depth) | (depth < MIN_DEPTH) | (depth > MAX_DEPTH)] = np.nan
-    return img, depth
+    return depth
+
+
+def load_pair(row):
+    """Full-resolution RGB uint8 (H, W, 3) and depth float32 (H, W, metres, NaN = invalid)."""
+    return load_image(row), load_depth(row)
 
 
 def intrinsics(row, x0=0, y0=0, width=None, flip=False):
@@ -205,6 +216,35 @@ def resize_image(img, short):
     return cv2.resize(img, size, interpolation=cv2.INTER_AREA), s
 
 
+def _cache_paths(row, short, cache=RESIZED_CACHE):
+    base = Path(cache) / f"r{short}" / Path(row["color_path"].replace("\\", "/")).with_suffix("")
+    return base.with_suffix(".png"), base.parent / (base.name + ".depth.npy")
+
+
+def make_resized(row, short):
+    """Resized image (area averaging) and depth (nearest), computed from the full-resolution files."""
+    img, depth = load_pair(row)
+    im, s = resize_image(img, short)
+    h, w = im.shape[:2]
+    return im, cv2.resize(depth, (w, h), interpolation=cv2.INTER_NEAREST), s
+
+
+def load_resized(row, short, with_depth=True):
+    """Resized image uint8, resized depth float32 (or None) and the scale factor. Read from the cache
+    (MODEST_RESIZED_CACHE, made by resize_cache.py) when it has this image, else computed. The cache
+    holds exactly what make_resized computes (lossless PNG; depth float16 like the source TIFFs)."""
+    if RESIZED_CACHE:
+        img_p, dep_p = _cache_paths(row, short)
+        if img_p.exists() and dep_p.exists():
+            im = cv2.cvtColor(cv2.imread(str(img_p), cv2.IMREAD_COLOR), cv2.COLOR_BGR2RGB)
+            d = np.load(dep_p).astype(np.float32) if with_depth else None
+            return im, d, short / min(int(row["height"]), int(row["width"]))
+    if not with_depth:
+        im, s = resize_image(load_image(row), short)
+        return im, None, s
+    return make_resized(row, short)
+
+
 class TrainResized(IterableDataset):
     """Endless stream of whole resized training images (flip + brightness/contrast jitter)."""
 
@@ -214,10 +254,8 @@ class TrainResized(IterableDataset):
     def _samples(self, rng):
         while True:
             row = self.rows[rng.randrange(len(self.rows))]
-            img, depth = load_pair(row)
-            im, s = resize_image(img, self.short)
+            im, d, s = load_resized(row, self.short)
             h, w = im.shape[:2]
-            d = cv2.resize(depth, (w, h), interpolation=cv2.INTER_NEAREST)
             flip = self.flip and rng.random() < 0.5
             if flip:
                 im, d = im[:, ::-1], d[:, ::-1]
@@ -250,10 +288,7 @@ class ValResized(Dataset):
 
     def __getitem__(self, i):
         row = self.rows[i]
-        img, depth = load_pair(row)
-        im, s = resize_image(img, self.short)
-        h, w = im.shape[:2]
-        d = cv2.resize(depth, (w, h), interpolation=cv2.INTER_NEAREST)
+        im, d, s = load_resized(row, self.short)
         return {"image": torch.from_numpy(np.ascontiguousarray(im)).permute(2, 0, 1).float() / 255.0,
                 "depth": torch.from_numpy(d), "K": torch.from_numpy(resize_intrinsics(row, s)), "cam": camera(row)}
 
@@ -271,8 +306,8 @@ class EvalResized(Dataset):
 
     def __getitem__(self, i):
         row = self.rows[i]
-        img, depth = load_pair(row)
-        im, s = resize_image(img, self.short)
+        im, _, s = load_resized(row, self.short, with_depth=False)
+        depth = load_depth(row)   # full resolution, for scoring
         return {"image": torch.from_numpy(np.ascontiguousarray(im)).permute(2, 0, 1).float() / 255.0,
                 "K": torch.from_numpy(resize_intrinsics(row, s)), "cam": camera(row),
                 "depth_full": torch.from_numpy(depth), "row_index": i,

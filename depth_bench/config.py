@@ -20,5 +20,7 @@ MIN_DEPTH, MAX_DEPTH = 0.3, 20.0   # metres; outside this range a pixel is not u
 # Focus distance per (scene, focal length, camera side), from def_calibration/focus_from_aperture_pairs.py.
 # Used only for the blur-binned evaluation; if the file is missing, blur bins are skipped.
 FOCUS_CSV = Path(os.environ.get("MODEST_FOCUS_CSV", r"D:\datasets\MODEST_focus\dfocus_aperture_pairs.csv"))
+# Optional cache of resized images (python -m depth_bench.resize_cache); empty = resize on the fly
+RESIZED_CACHE = os.environ.get("MODEST_RESIZED_CACHE", "")
 # Blur-diameter bins in pixels for the blur-binned AbsRel
 BLUR_BINS = (0, 1, 2, 4, 8, 16, 32, 64, float("inf"))
