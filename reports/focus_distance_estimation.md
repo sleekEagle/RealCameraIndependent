@@ -113,7 +113,7 @@ Thin-lens defocus, in half-resolution pixels, with x = 1/d − 1/s:
 
 Per setting, the patches are binned by inverse depth (25 bins, median Δσ per bin), and s, α and c0 are found by a robust grid search (weighted absolute error). The uncertainty of s is the range of s whose cost is within 10% of the best.
 
-**Self-check:** α can be predicted from fx, the real focal length (`f_true_mm` in the manifest) and the F-numbers. The ratio α_fit / α_pred came out consistent across settings (median 1.17, 5–95%: 0.76–1.58). The factor 1/4 that converts a blur disc to a Gaussian is approximate, so the ratio is not exactly 1.
+**Self-check:** α can be predicted from fx, the calibrated image distance (`v_mm` in the manifest, formerly `f_true_mm`; used in place of the focal length, 2–5% larger) and the F-numbers. The ratio α_fit / α_pred came out consistent across settings (median 1.17, 5–95%: 0.76–1.58). The factor 1/4 that converts a blur disc to a Gaussian is approximate, so the ratio is not exactly 1.
 
 ### 5.4 What failed first: a free c0
 

@@ -25,8 +25,10 @@ Steps
      calibration in stereo_calibration_v2 is used where it exists (column
      calib = v1/v2). Also rect_zoom = rectified fx / original fx,
      rect_turn_deg = how far rectification rotated that camera, and
-     f_true_mm = the camera's real lens focal length (original fx * pixel
-     pitch), for computing defocus blur.
+     v_mm = original fx * pixel pitch: the calibrated image distance (lens to
+     sensor), NOT the lens focal length f. A pinhole calibration measures v,
+     and v = f s / (s - f) is 2-5% larger than f at our focus distances s;
+     use 1/f = 1/v + 1/s for defocus blur. (Called f_true_mm before.)
   5. Per (scene, focal length): ~20% of split groups -> test, ~10% -> val,
      rest -> train (fixed seed). Fold labels (see LABELS below).
 
@@ -229,7 +231,7 @@ def add_intrinsics(rows):
                  width=cache[key]["size"][0], height=cache[key]["size"][1],
                  rect_zoom=round(float(P[0, 0] / K[0, 0]), 3), rect_turn_deg=round(rot, 2),
                  # real lens focal length of this camera (unrectified K), for blur: f = fx * pixel pitch
-                 f_true_mm=round(float(K[0, 0]) * PIXEL_PITCH_MM, 3),
+                 v_mm=round(float(K[0, 0]) * PIXEL_PITCH_MM, 3),
                  calib=cache[key]["calib"])
 
 
@@ -277,7 +279,7 @@ if __name__ == "__main__":
     add_intrinsics(rows)
     assign_splits(rows)
     cols = ["color_path", "depth_path", "scene", "fl_mm", "f_number", "side", "index", "view_id", "split_group", "view_role",
-            "fx", "fy", "cx", "cy", "width", "height", "rect_zoom", "rect_turn_deg", "f_true_mm", "calib", *FOLDS]
+            "fx", "fy", "cx", "cy", "width", "height", "rect_zoom", "rect_turn_deg", "v_mm", "calib", *FOLDS]
     with open(OUT_CSV, "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=cols, extrasaction="ignore")
         w.writeheader()

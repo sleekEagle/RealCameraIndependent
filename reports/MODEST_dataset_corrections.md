@@ -246,7 +246,7 @@ A **view** is one camera position and scene arrangement, shot at all five F-numb
 
 - `fx`, `fy`, `cx`, `cy`: intrinsics of the **rectified** image (P1 for left, P2 for right). Taken from `stereo_calibration_v2` for the 27 fixed settings, otherwise from the original calibration (column `calib` = `v2` / `v1`).
 - `rect_zoom`, `rect_turn_deg`: how much rectification zoomed and turned the image. Maximum now 1.19× and 12.4°; 207 images still turn more than 10° (Scene 5 at 50 and 55 mm, Scene 8 at 40 mm).
-- `f_true_mm`: the camera's real lens focal length from calibration (fx × 6.54 µm pixel size). It differs from the folder name, sometimes by more than 1 mm (for example "28 mm" is 29.1–29.2 mm, "65 mm" is 63.8–66.1 mm). **Use `f_true_mm` and `fx`, not the folder name, to compute defocus blur:** blur in rectified pixels ≈ fx × (f_true / N) × |1/s − 1/d|, where s is the focus distance.
+- `v_mm` (called `f_true_mm` before 2026-10-12): the calibrated image distance, fx × 6.54 µm pixel size. It differs from the folder name, sometimes by more than 1 mm (for example "28 mm" is 29.1–29.2 mm, "65 mm" is 63.8–66.1 mm). It is **not** the lens focal length f: a pinhole calibration measures the lens-to-sensor distance v = f·s/(s − f), which is 2–5% larger than f at our focus distances s. Get f from 1/f = 1/v + 1/s. **Use these and `fx`, not the folder name, to compute defocus blur:** blur in rectified pixels ≈ fx × (f / N) × |1/s − 1/d|, where s is the focus distance.
 
 ### 7.5 Checks
 

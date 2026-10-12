@@ -17,6 +17,8 @@ Models (and the HF / hub checkpoints they load):
     metric3d Metric3D v2 ConvNeXt-L (canonical focal 1000 px, label-scale mode)
     da3      Depth Anything 3 metric large (canonical focal 300 px)
     camind   Camind (WACV 2024) network as a plain two-stage CNN, trained from scratch, no camera input
+    camind_corr / camind_corr0  the same network with the camera correction of the blur model (with /
+             without the base blur sigma0), trained from scratch; uses intrinsics, f, N and focus distance
 """
 import sys
 
@@ -244,44 +246,80 @@ class DA3Metric(BaseWrapper):
         return [self.net.head]
 
 
+BLUR_K = 36000.0        # sigma (px) per metre of blur-circle diameter on the sensor (reports/base_blur.md)
+SIGMA0_PX = 0.8         # base blur (px) (reports/base_blur.md: 0.62 raw px; ~0.8 px in the rectified images)
+X_SCALE = 2.0           # |s - d| / d is divided by this (its 99th percentile on training views is 1.94)
+
+
 class CamindW(BaseWrapper):
     """Camind: "Camera-Independent Single Image Depth Estimation from Defocus Blur" (WACV 2024),
-    network copied unchanged in camind_net.py (dofNet_arch4.AENet, 16 base filters). Trained from scratch.
+    network in camind_net.py (dofNet_arch4.AENet, 16 base filters). Trained from scratch.
 
     Stage 1 maps the RGB crop to a one-channel map (the intermediate "blur" output). Stage 2 maps that
-    map (plus a second input channel) to metric depth.
+    map, after the optional camera correction, plus a second input channel to metric depth.
 
-    Benchmark setting: a plain two-stage CNN with no camera information (differs from the paper on purpose):
-      - no blur supervision: the loss is depth MSE only, so the stage-1 map is learned only through it;
-      - no manipulation of the stage-1 map: the paper's camera correction (multiplying it by
-        kcam * (s - f)) is turned off (AENet camind=False), so stage 2 gets the stage-1 map as it is;
-      - no focus distance: stage 2's second input channel, the focus distance in the paper, is filled
-        with the constant FOC_CONST for every image. The network is unchanged, so the channel stays.
-    It uses neither the intrinsics nor any lens setting."""
+    correction=False ("camind"): a plain two-stage CNN with no camera information. Stage 2 gets the
+    stage-1 map as it is, its second channel is the constant FOC_CONST, and the loss is depth MSE only.
+
+    correction=True ("camind_corr", "camind_corr0"): camera correction from the blur model
+        sigma(d)^2 = sigma0^2 + (C |s - d| / d)^2,   C = k f^2 / (N (s - f))
+    (f from the calibrated image distance v and s, 1/f = 1/v + 1/s). Read as sigma(d), the stage-1 output
+    goes through sqrt(max(sigma^2 - sigma0^2, 0)) = C |s - d| / d inside AENet and is multiplied by the
+    scalar camparam = 1 / (C x_scale), so stage 2 gets |s - d| / d scaled to about 0-1 (divided by
+    x_scale); its second channel is the focus distance s (m). Stage 1 is supervised on that quantity:
+    loss = depth MSE + stage1_weight * MSE(stage-2 input, true |s - d| / d / x_scale).
+    camind_corr0 is the ablation that ignores the base blur (sigma0 = 0: stage-2 input = stage-1
+    output / (C x_scale), the original Camind camind=True path)."""
     name = "camind"
     pretrained = False
     FOC_CONST = 1.0
+    INIT_BLUR = 2.0  # px: start value of the stage-1 output (output-layer bias), above sigma0, so the
+                     # base-blur removal does not block the gradient at the start
 
-    def __init__(self, num_filter=16):
+    def __init__(self, num_filter=16, correction=False, sigma0=SIGMA0_PX, blur_k=BLUR_K, stage1_weight=10.0,
+                 x_scale=X_SCALE):
         super().__init__()
         from .camind_net import AENet
         self.net = AENet(3, 1, num_filter, flag_step2=True)
-        self.last_blur = None   # stage-1 output of the last forward pass, for analysis
+        self.correction, self.sigma0, self.blur_k, self.x_scale = correction, sigma0, blur_k, x_scale
+        self.stage1_weight = stage1_weight if correction else 0.0
+        self.needs_camera = correction
+        if correction:
+            nn.init.constant_(self.net.conv_out_blur[0].bias, self.INIT_BLUR)
+        self.last_blur = None   # stage-1 output of the last forward pass
+        self.last_mul = None    # stage-2 input of the last forward pass (corrected: |s - d| / d estimate)
 
-    def forward(self, image, K=None):
+    def blur_scale(self, cam):
+        """C = k f^2 / (N (s - f)): defocus blur sigma (px) per unit of |s - d| / d."""
+        v, N, s = cam[:, 0], cam[:, 1], cam[:, 2]
+        f = v * s / (v + s)   # cam holds the calibrated image distance v; thin lens 1/f = 1/v + 1/s
+        return self.blur_k * f ** 2 / (N * (s - f))
+
+    def forward(self, image, K=None, cam=None):
         H, W = image.shape[-2:]
         ph, pw = (-H) % 16, (-W) % 16           # 4 poolings
         x = F.pad(image, (0, pw, 0, ph), mode="reflect") if ph or pw else image
         B, _, Hp, Wp = x.shape
-        foc_dist = x.new_full((B, 1, Hp, Wp), self.FOC_CONST)
-        depth, blur, _ = self.net(x, camind=False, camparam=None, foc_dist=foc_dist)
-        self.last_blur = blur[:, 0, :H, :W]
+        if self.correction:
+            camparam = 1.0 / (self.blur_scale(cam.float()) * self.x_scale).view(B, 1, 1, 1)
+            foc_dist = cam[:, 2].float().view(B, 1, 1, 1).expand(B, 1, Hp, Wp).to(x.dtype)
+            depth, blur, mul = self.net(x, camind=True, camparam=camparam, foc_dist=foc_dist,
+                                        sigma0=self.sigma0 if self.sigma0 > 0 else None)
+        else:
+            foc_dist = x.new_full((B, 1, Hp, Wp), self.FOC_CONST)
+            depth, blur, mul = self.net(x, camind=False, camparam=None, foc_dist=foc_dist)
+        self.last_blur, self.last_mul = blur[:, 0, :H, :W], mul[:, 0, :H, :W]
         return depth[:, 0, :H, :W]
 
     def loss(self, pred, batch):
         gt = batch["depth"].cuda(non_blocking=True)
         v = torch.isfinite(gt) & (gt > 0)
-        return F.mse_loss(pred.float()[v], gt[v])   # depth only: no blur supervision
+        loss = F.mse_loss(pred.float()[v], gt[v])
+        if self.stage1_weight > 0:   # stage 1, after the correction, should give the scaled true |s - d| / d
+            s = batch["cam"].cuda(non_blocking=True)[:, 2].view(-1, 1, 1)
+            target = (s - gt).abs() / gt / self.x_scale
+            loss = loss + self.stage1_weight * F.mse_loss(self.last_mul.float()[v], target[v])
+        return loss
 
     def encoder_blocks(self):
         return []
@@ -305,12 +343,30 @@ MODELS = {
     "metric3d": lambda **kw: Metric3DW(**kw),                              # official canonical focal 1000
     "metric3d_c6000": lambda **kw: Metric3DW(canonical_focal=6000.0, **kw),  # for fine-tuning on MODEST
     "da3": lambda **kw: DA3Metric(**kw),
-    "camind": lambda **kw: CamindW(**kw),   # from scratch
+    "camind": lambda **kw: CamindW(**kw),   # from scratch, no camera input
+    "camind_corr": lambda **kw: CamindW(correction=True, **kw),     # camera correction with sigma0
+    "camind_corr0": lambda sigma0=None, **kw: CamindW(correction=True, sigma0=0.0, **kw),  # ablation: sigma0 ignored
 }
 
 
 def build(name, **kw):
     return MODELS[name](**kw)
+
+
+def add_model_args(ap):
+    """Options of the camera-corrected Camind variants (ignored by the other models)."""
+    ap.add_argument("--sigma0", type=float, default=SIGMA0_PX, help="camind_corr: base blur in crop px")
+    ap.add_argument("--blur_k", type=float, default=BLUR_K, help="camind_corr*: blur constant k (px per m)")
+    ap.add_argument("--x_scale", type=float, default=X_SCALE,
+                    help="camind_corr*: |s-d|/d is divided by this (stage-2 input and stage-1 target)")
+    ap.add_argument("--stage1_weight", type=float, default=10.0,
+                    help="camind_corr*: weight of the stage-1 loss, MSE(corrected stage-1 output, true |s-d|/d)")
+
+
+def model_kwargs(name, a):
+    if name in ("camind_corr", "camind_corr0"):
+        return {"sigma0": a.sigma0, "blur_k": a.blur_k, "stage1_weight": a.stage1_weight, "x_scale": a.x_scale}
+    return {}
 
 
 def set_trainable(model, unfreeze_frac=0.25):

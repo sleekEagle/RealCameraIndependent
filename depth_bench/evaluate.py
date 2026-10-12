@@ -48,11 +48,13 @@ def stratified_subset(rows, fold, n, seed=0):
 
 def blur_map(depth, row, focus):
     """Blur-circle diameter in rectified pixels from the true depth (thin lens):
-    fx * (f / N) * |1/d - 1/s|, with f the real lens focal length, N the F-number, s the focus distance."""
+    fx * (f / N) * |1/d - 1/s|, with N the F-number and s the focus distance. The calibrated image
+    distance v is used for f (data.image_distance_m), which makes the blur 2-5% too large; kept as it is
+    so that blur bins match the finished benchmark runs."""
     s = focus.get((int(row["scene"]), int(row["fl_mm"]), row["side"]))
     if s is None:
         return torch.full_like(depth, float("nan"))
-    aperture_m = float(row["f_true_mm"]) / 1000 / float(row["f_number"])
+    aperture_m = data.image_distance_m(row) / float(row["f_number"])
     return float(row["fx"]) * aperture_m * torch.abs(1 / depth - 1 / s)
 
 
@@ -103,6 +105,7 @@ def main(argv=None):
     ap.add_argument("--resize", type=int, default=0,
                     help="short side (px) of the resized whole image the model sees; 0 = native crops. The "
                          "prediction is upsampled to full resolution and scored in the same crop windows")
+    models.add_model_args(ap)
     a = ap.parse_args(argv)
 
     rows = data.read_manifest()
@@ -115,7 +118,7 @@ def main(argv=None):
     out_dir = RUNS_DIR / "eval" / a.out
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    model = models.build(a.model).cuda().eval()
+    model = models.build(a.model, **models.model_kwargs(a.model, a)).cuda().eval()
     if a.ckpt:
         models.set_trainable(model, 0)  # only to make all params frozen; the checkpoint restores weights
         load_trainable(model, a.ckpt)
@@ -150,14 +153,15 @@ def main(argv=None):
                    torch.stack([full[y:y + c, x:x + c] for x, y in crops]),
                    [it["row_index"]] * len(crops), list(range(len(crops))))
 
-    keep = ["color_path", "scene", "fl_mm", "f_number", "side", "view_id", "f_true_mm", "rect_turn_deg", *FOLDS]
+    keep = ["color_path", "scene", "fl_mm", "f_number", "side", "view_id", "rect_turn_deg", *FOLDS]
     per_crop, t0 = [], time.time()
     for bi, (pred, depth, row_index, crop_index) in enumerate(resized_batches() if a.resize else native_batches()):
         # blur is computed in full-resolution pixels in both settings (from row["fx"])
         blur = torch.stack([blur_map(d, rows[i], focus) for d, i in zip(depth, row_index)])
         bins = blur_binned_absrel(pred, depth, blur, BLUR_BINS)
         for m, bb, c, pr, gt, i, j in zip(depth_metrics(pred, depth), bins, blur, pred, depth, row_index, crop_index):
-            r = {**{k: rows[i][k] for k in keep}, "crop_index": j, **m}
+            r = {**{k: rows[i][k] for k in keep}, "v_mm": round(data.image_distance_m(rows[i]) * 1000, 3),
+                 "crop_index": j, **m}
             if "absrel" in m:
                 r.update(boundary_f1_si(pr.numpy(), gt.numpy()))
             c = c[torch.isfinite(c)]

@@ -56,10 +56,18 @@ def focus_table(path=FOCUS_CSV):
     return _FOCUS
 
 
+def image_distance_m(row):
+    """Calibrated image distance v (m): original fx x pixel pitch. Not the lens focal length f: the
+    calibration fits a pinhole model, whose focal length is the lens-to-sensor distance, v = f s / (s - f),
+    2-5% larger than f at our focus distances. Column v_mm (called f_true_mm in older manifests)."""
+    return float(row["v_mm"] if "v_mm" in row else row["f_true_mm"]) / 1000
+
+
 def camera(row):
-    """Lens settings of an image: [real focal length (m), F-number, focus distance (m, NaN if unknown)]."""
+    """Lens settings of an image: [image distance v (m), F-number, focus distance s (m, NaN if unknown)].
+    The focal length follows from 1/f = 1/v + 1/s."""
     s = focus_table().get((int(row["scene"]), int(row["fl_mm"]), row["side"]), float("nan"))
-    return torch.tensor([float(row["f_true_mm"]) / 1000, float(row["f_number"]), s], dtype=torch.float32)
+    return torch.tensor([image_distance_m(row), float(row["f_number"]), s], dtype=torch.float32)
 
 
 def _path(rel):

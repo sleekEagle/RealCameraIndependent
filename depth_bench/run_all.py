@@ -30,13 +30,18 @@ import subprocess
 import sys
 import time
 
+from . import models
 from .config import FOLDS, RUNS_DIR
 from .finetune import EXIT_TIME_LIMIT
 
 ZERO_SHOT = ["da2", "unidepth", "unidepth_noK", "metric3d", "da3"]
 # benchmark name -> model name used for training (Metric3D: canonical focal 6000 px, see models.py)
-TRAIN = {"da2": "da2", "unidepth": "unidepth", "metric3d": "metric3d_c6000", "da3": "da3", "camind": "camind"}
-SCRATCH = {"camind"}
+TRAIN = {"da2": "da2", "unidepth": "unidepth", "metric3d": "metric3d_c6000", "da3": "da3", "camind": "camind",
+         "camind_corr": "camind_corr", "camind_corr0": "camind_corr0"}
+# trained from scratch. camind_corr / camind_corr0: Camind with the camera correction of the blur model,
+# with / without the base blur sigma0 (models.CamindW); not in the default --models list
+SCRATCH = {"camind", "camind_corr", "camind_corr0"}
+DEFAULT_MODELS = ["da2", "unidepth", "metric3d", "da3", "camind"]
 
 
 def _show(line, keys):
@@ -92,7 +97,7 @@ def release(job):
 def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--folds", nargs="*", default=list(FOLDS))
-    ap.add_argument("--models", nargs="*", default=list(TRAIN), help=f"from {list(TRAIN)}")
+    ap.add_argument("--models", nargs="*", default=DEFAULT_MODELS, help=f"from {list(TRAIN)}")
     ap.add_argument("--zero_shot", nargs="*", default=ZERO_SHOT, help="models for zero-shot ('none' to skip)")
     ap.add_argument("--ft_samples", type=int, default=40000, help="fine-tuning budget (crops)")
     ap.add_argument("--scratch_samples", type=int, default=200000, help="from-scratch budget (crops)")
@@ -106,10 +111,14 @@ def main(argv=None):
     ap.add_argument("--resize", type=int, default=0,
                     help="resized setting: whole images with this short side (px), e.g. 518; 0 = native crops. "
                          "Results get the suffix _r<size>")
+    ap.add_argument("--tag", default="", help="suffix of run and result names (e.g. for a non-default --sigma0 or --stage1_weight)")
+    models.add_model_args(ap)
     ap.add_argument("--dry_run", action="store_true")
     a = ap.parse_args(argv)
     ev = ["--crops", str(a.crops), "--workers", str(a.workers)]
-    sfx = f"_r{a.resize}" if a.resize else ""
+    sfx = (f"_r{a.resize}" if a.resize else "") + (f"_{a.tag}" if a.tag else "")
+    margs = ["--sigma0", str(a.sigma0), "--blur_k", str(a.blur_k), "--stage1_weight", str(a.stage1_weight),
+             "--x_scale", str(a.x_scale)]
     if a.resize:
         ev += ["--resize", str(a.resize)]
         # resized focal lengths (646-1713 px) suit Metric3D's official canonical focal of 1000 px
@@ -151,7 +160,8 @@ def main(argv=None):
                 continue
             if not (rd / "done.json").exists():
                 scratch = name in SCRATCH
-                tr = ["depth_bench.finetune", "--model", m, "--fold", fold, "--resize", str(a.resize),
+                tr = ["depth_bench.finetune", "--model", m, "--fold", fold, "--resize", str(a.resize), *margs,
+                      *(["--tag", a.tag] if a.tag else []),
                       "--samples", str(a.scratch_samples if scratch else a.ft_samples), "--workers", str(a.workers)]
                 # same 16 crops per optimizer step for all; the small CNN fits 8 per batch
                 batch, accum = (8, 2) if scratch else (2, 8)
@@ -170,7 +180,7 @@ def main(argv=None):
             if left_h() < 0.75:
                 print(f"less than 45 min left in this session: evaluation of {job} next session")
                 break
-            code, out = run(["depth_bench.evaluate", "--model", m, "--fold", fold, *ev, "--ckpt", str(rd / "best.pt"),
+            code, out = run(["depth_bench.evaluate", "--model", m, "--fold", fold, *ev, *margs, "--ckpt", str(rd / "best.pt"),
                              "--out", f"ft_{job}"], f"eval_{job}", a.dry_run)
             if code:
                 print(f"   evaluation {name} {fold} FAILED (exit {code}):\n{out}", flush=True)

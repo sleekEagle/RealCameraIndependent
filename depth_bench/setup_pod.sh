@@ -10,6 +10,9 @@
 #   FOLDS="S1 S2" MODELS="da2 camind" ZERO_SHOT=none bash setup_pod.sh
 # Resized setting (whole images, short side 518 px; all 5 models, Camind trained from scratch):
 #   curl -sL <url above> | RESIZE=518 bash
+# Extra run_all arguments (EXTRA), e.g. the camera-corrected Camind and its ablation:
+#   curl -sL <url above> | MODELS="camind_corr camind_corr0" ZERO_SHOT=none bash
+#   curl -sL <url above> | MODELS="camind_corr" ZERO_SHOT=none EXTRA="--sigma0 1.0 --tag s1" bash
 #
 # Safe to run again (after a pod restart): finished steps are skipped, training resumes.
 # Everything lives on the volume (/workspace), so it survives stopping the pod.
@@ -22,6 +25,7 @@ FOLDS=${FOLDS:-"S1 S2 S3 S4 S5"}
 RESIZE=${RESIZE:-0}
 MODELS=${MODELS:-"da2 unidepth metric3d da3 camind"}
 ZERO_SHOT=${ZERO_SHOT:-"da2 unidepth unidepth_noK metric3d da3"}
+EXTRA=${EXTRA:-""}
 
 echo "== GPU"
 nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
@@ -73,9 +77,9 @@ if [ "$RESIZE" != 0 ]; then
   echo "== resize cache ($RESIZE px)"
   python -m depth_bench.resize_cache --out $MODEST_RESIZED_CACHE --short $RESIZE
 fi
-python -m depth_bench.run_all --dry_run --folds $FOLDS --models $MODELS --zero_shot $ZERO_SHOT --resize $RESIZE
+python -m depth_bench.run_all --dry_run --folds $FOLDS --models $MODELS --zero_shot $ZERO_SHOT --resize $RESIZE $EXTRA
 # --clear_locks: a pod stop/restart can leave lock files of jobs that were running. Only one run_all
 # runs on this pod (checked above), so they are all stale.
-nohup python -m depth_bench.run_all --folds $FOLDS --models $MODELS --zero_shot $ZERO_SHOT --resize $RESIZE --clear_locks \
+nohup python -m depth_bench.run_all --folds $FOLDS --models $MODELS --zero_shot $ZERO_SHOT --resize $RESIZE --clear_locks $EXTRA \
       >> $W/MODEST_runs/run_all.log 2>&1 &
 echo "started (pid $!). Follow with:  tail -f $W/MODEST_runs/run_all.log"

@@ -1,6 +1,6 @@
 """
 Fine-tune one model on one setting fold (same recipe for every model).
-Models without pretrained weights (camind, camind_nocorr) are trained from scratch with the same
+Models without pretrained weights (camind, camind_corr, camind_corr0) are trained from scratch with the same
 loop: all their weights are trained, with --lr_head, and with their own loss (model.loss).
 
 Recipe: train the head and the last `--unfreeze` fraction of encoder blocks; AdamW with a
@@ -81,6 +81,7 @@ def main(argv=None):
     ap.add_argument("--workers", type=int, default=4)
     ap.add_argument("--tag", default="")
     ap.add_argument("--seed", type=int, default=0)
+    models.add_model_args(ap)
     a = ap.parse_args(argv)
 
     torch.manual_seed(a.seed); random.seed(a.seed); np.random.seed(a.seed)
@@ -95,7 +96,7 @@ def main(argv=None):
     val_rows = random.Random(0).sample(val_rows, min(a.val_images, len(val_rows)))
     print(f"{a.model} {a.fold}: {len(train_rows)} train images, {len(val_rows)} val images", flush=True)
 
-    model = models.build(a.model).cuda()
+    model = models.build(a.model, **models.model_kwargs(a.model, a)).cuda()
     enc_p, head_p = models.set_trainable(model, a.unfreeze)
     n_tr = sum(p.numel() for p in enc_p + head_p)
     print(f"trainable params: {n_tr / 1e6:.1f}M of {sum(p.numel() for p in model.parameters()) / 1e6:.1f}M", flush=True)

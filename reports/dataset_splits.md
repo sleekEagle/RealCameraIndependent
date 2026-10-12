@@ -141,7 +141,7 @@ Each pair gives two training or test images, Left and Right, each with its own d
 
 - **Depth per F-number.** Each image's ground truth is the stereo depth computed from the image pair at the same F-number. Depth from F16 is never moved over to other F-numbers. Valid depth is 0.3–20 m; other pixels are ignored.
 - **No resizing.** Resizing would shrink the defocus blur, which is what the study is about. Models see native-resolution crops (518 × 518 by default). A crop keeps fx and fy and only shifts the principal point.
-- **Intrinsics.** Each row stores the rectified fx, fy, cx and cy. For 27 settings these come from the fixed calibration (`calib = v2`); the other 58 use the original one (`v1`). `f_true_mm` is the real lens focal length, used to compute blur.
+- **Intrinsics.** Each row stores the rectified fx, fy, cx and cy. For 27 settings these come from the fixed calibration (`calib = v2`); the other 58 use the original one (`v1`). `v_mm` (called `f_true_mm` before 2026-10-12) is the calibrated image distance, original fx × pixel size. It is not the lens focal length f: a pinhole calibration measures the lens-to-sensor distance v = f·s/(s − f), 2–5% larger than f at our focus distances s. Use 1/f = 1/v + 1/s to get f.
 - **Fixed test crops.** Each test image gets the same crop positions in every run and for every model. They come from a seed based on the image path, and each crop must have at least 50% valid depth.
 
 ## 8. Limitations

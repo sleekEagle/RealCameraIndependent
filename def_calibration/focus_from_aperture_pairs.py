@@ -14,7 +14,7 @@ Model (thin lens, all in half-resolution pixels; x = 1/d - 1/s in 1/m):
     blur std of reference sigma_r = k * (N_t / N_r) * |x|  (+ a small constant, e.g. diffraction)
     measured extra blur   dsigma^2 = max(0, alpha * x^2 - c0),  alpha = k^2 * (1 - (N_t/N_r)^2)
 s (the focus distance), alpha and c0 >= 0 are found by a robust grid search on binned medians.
-alpha / alpha_pred (from fx, f_true_mm and the F-numbers in the manifest) is reported as a
+alpha / alpha_pred (from fx, v_mm (the image distance, used for f) and the F-numbers in the manifest) is reported as a
 self-check: it should be similar across settings (the factor 1/4 for disc -> Gaussian blur
 is approximate, so its absolute value is not exactly 1).
 
@@ -212,7 +212,7 @@ def main():
         samples = np.concatenate([np.load(p) for p, _, _ in vl])
         t = vl[0][1]
         n_ref = np.median([nr for _, _, nr in vl])
-        k = float(t["fx"]) / 2 * (float(t["f_true_mm"]) / 1000 / TARGET_F) / 4
+        k = float(t["fx"]) / 2 * (float(t["v_mm"] if "v_mm" in t else t["f_true_mm"]) / 1000 / TARGET_F) / 4
         alpha_pred = k ** 2 * (1 - (TARGET_F / n_ref) ** 2)
         res = fit_setting(samples, alpha_pred, a.c0) if len(samples) >= 100 else {"status": "too_few_patches"}
         if res["status"] == "ok":

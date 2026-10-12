@@ -1,6 +1,8 @@
-# Copied unchanged (apart from this header) from github.com/sleekEagle/defocus_camind,
-# source/arch/dofNet_arch4.py: the network of "Camera-Independent Single Image Depth Estimation from
-# Defocus Blur" (WACV 2024). Used through depth_bench.models.CamindW, which adapts it to MODEST.
+# Copied from github.com/sleekEagle/defocus_camind, source/arch/dofNet_arch4.py: the network of
+# "Camera-Independent Single Image Depth Estimation from Defocus Blur" (WACV 2024). Used through
+# depth_bench.models.CamindW, which adapts it to MODEST. One change (marked "depth_bench change"): an
+# optional sigma0 argument; with camind=True, the base blur sigma0 is removed from the stage-1 output
+# before it is multiplied by camparam. sigma0=None (default) keeps the original behaviour.
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
@@ -115,7 +117,7 @@ class AENet(nn.Module):
         return pool
 
 
-    def forward(self,x,inp=3,k=1,camind=True,flag_step2=True,camparam=0,foc_dist=0):
+    def forward(self,x,inp=3,k=1,camind=True,flag_step2=True,camparam=0,foc_dist=0,sigma0=None):
         down1 = []
         pool_temp = []
         for j in range(self.n_blocks + 1):
@@ -175,7 +177,13 @@ class AENet(nn.Module):
                     else:
                         out_blur = torch.cat([out_blur, out_col_blur], dim=1)
         if(camind):
-            mul=out_blur*camparam
+            if sigma0 is not None:
+                # depth_bench change: remove the base blur sigma0 (px) from the predicted blur before the
+                # camera scaling: sqrt(max(blur^2 - sigma0^2, 0)) (+ a small eps for a finite gradient)
+                out_blur_def = torch.sqrt(torch.relu(out_blur ** 2 - sigma0 ** 2) + 1e-4)
+                mul=out_blur_def*camparam
+            else:
+                mul=out_blur*camparam
         else:
             mul=out_blur
 

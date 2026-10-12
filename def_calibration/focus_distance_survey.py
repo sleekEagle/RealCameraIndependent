@@ -123,14 +123,14 @@ def main():
     for r in rows:
         settings[(int(r["scene"]), int(r["fl_mm"]), r["side"])].append(r)
 
-    cols = ["scene", "fl_mm", "side", "f_true_mm", "status", "n_fstops", "n_samples", "n_bins",
+    cols = ["scene", "fl_mm", "side", "v_mm", "status", "n_fstops", "n_samples", "n_bins",
             "d_focus", "d_focus_stderr", "d_focus_argmax", "p", "rmse", "depth_p5", "depth_p95"]
     with open(OUT_DIR / "dfocus_per_setting.csv", "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=cols, extrasaction="ignore")
         w.writeheader()
         for (s, fl, side), rs in sorted(settings.items()):
             res = fit_group(rs, OUT_DIR / "plots" / f"s{s}_fl{fl}_{side}.png", f"Scene{s} {fl}mm {side}")
-            w.writerow({"scene": s, "fl_mm": fl, "side": side, "f_true_mm": rs[0]["f_true_mm"], **res})
+            w.writerow({"scene": s, "fl_mm": fl, "side": side, "v_mm": rs[0]["v_mm"] if "v_mm" in rs[0] else rs[0]["f_true_mm"], **res})
             f.flush()
             print(f"Scene{s} {fl}mm {side}: {res.get('status')} D_focus {res.get('d_focus')} "
                   f"(+-{res.get('d_focus_stderr')}, argmax {res.get('d_focus_argmax')})", flush=True)
