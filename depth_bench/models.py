@@ -267,7 +267,13 @@ class CamindW(BaseWrapper):
     goes through sqrt(max(sigma^2 - sigma0^2, 0)) = C |s - d| / d inside AENet and is multiplied by the
     scalar camparam = 1 / (C x_scale), so stage 2 gets |s - d| / d scaled to about 0-1 (divided by
     x_scale); its second channel is the focus distance s (m). Stage 1 is supervised on that quantity:
-    loss = depth MSE + stage1_weight * MSE(stage-2 input, true |s - d| / d / x_scale).
+    loss = depth_weight * depth MSE + stage1_weight * stage-1 loss, where the stage-1 loss is
+      stage1_space="x":     MSE(stage-2 input, true |s - d| / d / x_scale). A blur error of e px costs
+                            (e / (C x_scale))^2, so images with a small C (high F-number, short focal
+                            length) dominate; there the defocus is mostly below sigma0.
+      stage1_space="sigma": MSE(stage-1 output, true blur sqrt(sigma0^2 + (C |s - d| / d)^2)) in px:
+                            the same weight for a blur error in every image.
+    depth_weight=0 trains stage 1 alone (a probe: can the blur be read from the image at all?).
     camind_corr0 is the ablation that ignores the base blur (sigma0 = 0: stage-2 input = stage-1
     output / (C x_scale), the original Camind camind=True path)."""
     name = "camind"
@@ -277,12 +283,13 @@ class CamindW(BaseWrapper):
                      # base-blur removal does not block the gradient at the start
 
     def __init__(self, num_filter=16, correction=False, sigma0=SIGMA0_PX, blur_k=BLUR_K, stage1_weight=10.0,
-                 x_scale=X_SCALE):
+                 x_scale=X_SCALE, stage1_space="x", depth_weight=1.0):
         super().__init__()
         from .camind_net import AENet
         self.net = AENet(3, 1, num_filter, flag_step2=True)
         self.correction, self.sigma0, self.blur_k, self.x_scale = correction, sigma0, blur_k, x_scale
         self.stage1_weight = stage1_weight if correction else 0.0
+        self.stage1_space, self.depth_weight = stage1_space, depth_weight
         self.needs_camera = correction
         if correction:
             nn.init.constant_(self.net.conv_out_blur[0].bias, self.INIT_BLUR)
@@ -314,11 +321,16 @@ class CamindW(BaseWrapper):
     def loss(self, pred, batch):
         gt = batch["depth"].cuda(non_blocking=True)
         v = torch.isfinite(gt) & (gt > 0)
-        loss = F.mse_loss(pred.float()[v], gt[v])
-        if self.stage1_weight > 0:   # stage 1, after the correction, should give the scaled true |s - d| / d
-            s = batch["cam"].cuda(non_blocking=True)[:, 2].view(-1, 1, 1)
-            target = (s - gt).abs() / gt / self.x_scale
-            loss = loss + self.stage1_weight * F.mse_loss(self.last_mul.float()[v], target[v])
+        loss = self.depth_weight * F.mse_loss(pred.float()[v], gt[v])
+        if self.stage1_weight > 0:
+            cam = batch["cam"].cuda(non_blocking=True).float()
+            x = (cam[:, 2].view(-1, 1, 1) - gt).abs() / gt
+            if self.stage1_space == "sigma":   # stage-1 output vs the blur the blur model gives (px)
+                C = self.blur_scale(cam).view(-1, 1, 1)
+                target = torch.sqrt(self.sigma0 ** 2 + (C * x) ** 2)
+                loss = loss + self.stage1_weight * F.mse_loss(self.last_blur.float()[v], target[v])
+            else:   # stage 1, after the correction, should give the scaled true |s - d| / d
+                loss = loss + self.stage1_weight * F.mse_loss(self.last_mul.float()[v], x[v] / self.x_scale)
         return loss
 
     def encoder_blocks(self):
@@ -361,11 +373,16 @@ def add_model_args(ap):
                     help="camind_corr*: |s-d|/d is divided by this (stage-2 input and stage-1 target)")
     ap.add_argument("--stage1_weight", type=float, default=10.0,
                     help="camind_corr*: weight of the stage-1 loss, MSE(corrected stage-1 output, true |s-d|/d)")
+    ap.add_argument("--stage1_space", choices=["x", "sigma"], default="x",
+                    help="camind_corr*: stage-1 loss on |s-d|/d (x) or on the blur in px (sigma)")
+    ap.add_argument("--depth_weight", type=float, default=1.0,
+                    help="camind_corr*: weight of the depth loss (0: train stage 1 alone, a blur probe)")
 
 
 def model_kwargs(name, a):
     if name in ("camind_corr", "camind_corr0"):
-        return {"sigma0": a.sigma0, "blur_k": a.blur_k, "stage1_weight": a.stage1_weight, "x_scale": a.x_scale}
+        return {"sigma0": a.sigma0, "blur_k": a.blur_k, "stage1_weight": a.stage1_weight, "x_scale": a.x_scale,
+                "stage1_space": a.stage1_space, "depth_weight": a.depth_weight}
     return {}
 
 
