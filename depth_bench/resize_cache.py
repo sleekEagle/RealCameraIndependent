@@ -44,8 +44,11 @@ def main(argv=None):
     ap.add_argument("--short", type=int, default=518)
     ap.add_argument("--workers", type=int, default=os.cpu_count() or 2)
     ap.add_argument("--limit", type=int, default=0, help="only the first N images (for testing)")
+    ap.add_argument("--fold", help="only this fold's train and val images (to save disk space)")
     a = ap.parse_args(argv)
     rows = data.read_manifest()
+    if a.fold:
+        rows = data.select(rows, a.fold, ("train", "val"))
     if a.limit:
         rows = rows[:a.limit]
     t0, done = time.time(), 0
