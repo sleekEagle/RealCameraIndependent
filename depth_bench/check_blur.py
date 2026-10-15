@@ -12,6 +12,8 @@ true and predicted blur, depth).
 
     python -m depth_bench.check_blur --model camind_corr --fold S1                 # uses last.pt
     python -m depth_bench.check_blur --model camind_corr --fold S1 --ckpt <path>/best.pt --images 120
+    python -m depth_bench.check_blur --model camind_corr --fold S1 --tag overfit --split train --train_images 20
+        (overfit test: the same training images as finetune --train_images 20)
 Outputs in <RUNS_DIR>/blur_check/<run name>_step<step>/: summary.csv, examples.png
 """
 import argparse
@@ -47,7 +49,9 @@ def main(argv=None):
     ap.add_argument("--fold", required=True)
     ap.add_argument("--tag", default="", help="as used for training (run name suffix)")
     ap.add_argument("--ckpt", help="default: <RUNS_DIR>/finetune/<model>_<fold>[_<tag>]/last.pt")
-    ap.add_argument("--images", type=int, default=60, help="val images (2 fixed crops each)")
+    ap.add_argument("--images", type=int, default=60, help="images (2 fixed crops each)")
+    ap.add_argument("--split", choices=["val", "train"], default="val")
+    ap.add_argument("--train_images", type=int, default=0, help="with --split train: as for finetune")
     ap.add_argument("--stride", type=int, default=4, help="pixel subsampling for the statistics")
     models.add_model_args(ap)
     a = ap.parse_args(argv)
@@ -57,7 +61,9 @@ def main(argv=None):
     model = models.build(a.model, **models.model_kwargs(a.model, a)).cuda().eval()
     models.set_trainable(model, 0)
     step = load_trainable(model, ckpt).get("step", "?")
-    rows = data.select(data.read_manifest(), a.fold, ("val",))
+    rows = data.select(data.read_manifest(), a.fold, (a.split,))
+    if a.split == "train":
+        rows = data.subset(rows, a.train_images)
     rows = random.Random(0).sample(rows, min(a.images, len(rows)))
     ds = data.EvalCrops(rows, 518, 2)
     out = RUNS_DIR / "blur_check" / f"{run}_step{step}"
@@ -98,7 +104,7 @@ def main(argv=None):
     res = pd.DataFrame(res)
     res.to_csv(out / "summary.csv", index=False)
     pd.set_option("display.width", 200)
-    print(f"{run}, checkpoint step {step}, {len(rows)} val images")
+    print(f"{run}, checkpoint step {step}, {len(rows)} {a.split} images")
     print(res.round(3).to_string(index=False))
 
     fig, axs = plt.subplots(len(examples), 6, figsize=(18, 3 * len(examples)), squeeze=False)

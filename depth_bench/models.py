@@ -272,13 +272,17 @@ class CamindW(BaseWrapper):
                             (e / (C x_scale))^2, so images with a small C (high F-number, short focal
                             length) dominate; there the defocus is mostly below sigma0.
       stage1_space="sigma": MSE(stage-1 output, true blur sqrt(sigma0^2 + (C |s - d| / d)^2)) in px:
-                            the same weight for a blur error in every image.
+                            the same weight for a blur error in every image, but the rare large blurs
+                            (a 10 px error costs 100x a 1 px error) dominate.
+      stage1_space="logsigma": MSE(log(|stage-1 output| + LOG_EPS), log(true blur + LOG_EPS)): relative
+                            errors, so the common small blurs (73% of edge pixels below 1.5 px) count.
     depth_weight=0 trains stage 1 alone (a probe: can the blur be read from the image at all?).
     camind_corr0 is the ablation that ignores the base blur (sigma0 = 0: stage-2 input = stage-1
     output / (C x_scale), the original Camind camind=True path)."""
     name = "camind"
     pretrained = False
     FOC_CONST = 1.0
+    LOG_EPS = 0.05   # px, keeps the log finite (camind_corr0: the true blur C |s - d| / d can be 0)
     INIT_BLUR = 2.0  # px: start value of the stage-1 output (output-layer bias), above sigma0, so the
                      # base-blur removal does not block the gradient at the start
 
@@ -325,10 +329,13 @@ class CamindW(BaseWrapper):
         if self.stage1_weight > 0:
             cam = batch["cam"].cuda(non_blocking=True).float()
             x = (cam[:, 2].view(-1, 1, 1) - gt).abs() / gt
-            if self.stage1_space == "sigma":   # stage-1 output vs the blur the blur model gives (px)
+            if self.stage1_space in ("sigma", "logsigma"):   # stage-1 output vs the blur model's blur (px)
                 C = self.blur_scale(cam).view(-1, 1, 1)
                 target = torch.sqrt(self.sigma0 ** 2 + (C * x) ** 2)
-                loss = loss + self.stage1_weight * F.mse_loss(self.last_blur.float()[v], target[v])
+                pred = self.last_blur.float()
+                if self.stage1_space == "logsigma":
+                    pred, target = torch.log(pred.abs() + self.LOG_EPS), torch.log(target + self.LOG_EPS)
+                loss = loss + self.stage1_weight * F.mse_loss(pred[v], target[v])
             else:   # stage 1, after the correction, should give the scaled true |s - d| / d
                 loss = loss + self.stage1_weight * F.mse_loss(self.last_mul.float()[v], x[v] / self.x_scale)
         return loss
@@ -373,8 +380,8 @@ def add_model_args(ap):
                     help="camind_corr*: |s-d|/d is divided by this (stage-2 input and stage-1 target)")
     ap.add_argument("--stage1_weight", type=float, default=10.0,
                     help="camind_corr*: weight of the stage-1 loss, MSE(corrected stage-1 output, true |s-d|/d)")
-    ap.add_argument("--stage1_space", choices=["x", "sigma"], default="x",
-                    help="camind_corr*: stage-1 loss on |s-d|/d (x) or on the blur in px (sigma)")
+    ap.add_argument("--stage1_space", choices=["x", "sigma", "logsigma"], default="x",
+                    help="camind_corr*: stage-1 loss on |s-d|/d (x), on the blur in px (sigma) or on its log")
     ap.add_argument("--depth_weight", type=float, default=1.0,
                     help="camind_corr*: weight of the depth loss (0: train stage 1 alone, a blur probe)")
 

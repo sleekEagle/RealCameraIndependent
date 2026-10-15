@@ -43,6 +43,11 @@ def select(rows, fold=None, labels=None, view_role=None):
 _FOCUS = None
 
 
+def subset(rows, n):
+    """A fixed random subset of n rows (all rows if n is 0 or larger than len(rows))."""
+    return random.Random(0).sample(rows, n) if 0 < n < len(rows) else rows
+
+
 def focus_table(path=FOCUS_CSV):
     """(scene, fl_mm, side) -> estimated focus distance in metres (def_calibration/focus_from_aperture_pairs.py).
     Empty if the file is missing."""

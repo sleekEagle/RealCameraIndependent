@@ -80,6 +80,9 @@ def main(argv=None):
     ap.add_argument("--val_crops", type=int, default=2)
     ap.add_argument("--workers", type=int, default=4)
     ap.add_argument("--tag", default="")
+    ap.add_argument("--train_images", type=int, default=0,
+                    help="train on a fixed random subset of this many images (0 = all; e.g. an overfit test)")
+    ap.add_argument("--clip", type=float, default=1.0, help="gradient-norm clipping (0 = off)")
     ap.add_argument("--seed", type=int, default=0)
     models.add_model_args(ap)
     a = ap.parse_args(argv)
@@ -91,7 +94,7 @@ def main(argv=None):
     (run / "config.json").write_text(json.dumps(vars(a), indent=1))
 
     rows = data.read_manifest()
-    train_rows = data.select(rows, a.fold, ("train",))
+    train_rows = data.subset(data.select(rows, a.fold, ("train",)), a.train_images)
     val_rows = data.select(rows, a.fold, ("val",))
     val_rows = random.Random(0).sample(val_rows, min(a.val_images, len(val_rows)))
     print(f"{a.model} {a.fold}: {len(train_rows)} train images, {len(val_rows)} val images", flush=True)
@@ -154,7 +157,8 @@ def main(argv=None):
             scaler.scale(loss).backward()
             run_loss.append(loss.item() * a.accum)
         scaler.unscale_(opt)
-        torch.nn.utils.clip_grad_norm_(enc_p + head_p, 1.0)
+        if a.clip > 0:
+            torch.nn.utils.clip_grad_norm_(enc_p + head_p, a.clip)
         scaler.step(opt)
         scaler.update()
         step += 1
