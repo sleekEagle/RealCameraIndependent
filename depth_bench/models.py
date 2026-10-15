@@ -277,6 +277,10 @@ class CamindW(BaseWrapper):
       stage1_space="logsigma": MSE(log(|stage-1 output| + LOG_EPS), log(true blur + LOG_EPS)): relative
                             errors, so the common small blurs (73% of edge pixels below 1.5 px) count.
     depth_weight=0 trains stage 1 alone (a probe: can the blur be read from the image at all?).
+    stage1_mask=t (> 0): the stage-1 loss uses only pixels whose local contrast (texture_mask: standard
+    deviation of the brightness, 0-1 scale, in a 31 px window) is at least t; 0.02 keeps ~40% of the
+    pixels (5% of plain crops, 75% of busy ones). On plain surfaces the blur cannot be seen, and their
+    labels pull the output to the mean.
 
     Dropout (all variants): AENet puts Dropout(0.2) right before each max-pool. Max-pooling the
     rescaled (x 1/0.8) training activations gives larger values than in eval mode, so a model trained
@@ -293,7 +297,7 @@ class CamindW(BaseWrapper):
                      # base-blur removal does not block the gradient at the start
 
     def __init__(self, num_filter=16, correction=False, sigma0=SIGMA0_PX, blur_k=BLUR_K, stage1_weight=10.0,
-                 x_scale=X_SCALE, stage1_space="x", depth_weight=1.0, dropout=0.0):
+                 x_scale=X_SCALE, stage1_space="x", depth_weight=1.0, dropout=0.0, stage1_mask=0.0):
         super().__init__()
         from .camind_net import AENet
         self.net = AENet(3, 1, num_filter, flag_step2=True)
@@ -302,7 +306,7 @@ class CamindW(BaseWrapper):
                 m.p = dropout
         self.correction, self.sigma0, self.blur_k, self.x_scale = correction, sigma0, blur_k, x_scale
         self.stage1_weight = stage1_weight if correction else 0.0
-        self.stage1_space, self.depth_weight = stage1_space, depth_weight
+        self.stage1_space, self.depth_weight, self.stage1_mask = stage1_space, depth_weight, stage1_mask
         self.needs_camera = correction
         if correction:
             nn.init.constant_(self.net.conv_out_blur[0].bias, self.INIT_BLUR)
@@ -331,11 +335,27 @@ class CamindW(BaseWrapper):
         self.last_blur, self.last_mul = blur[:, 0, :H, :W], mul[:, 0, :H, :W]
         return depth[:, 0, :H, :W]
 
+    MASK_WIN = 31   # px, window of the local contrast (spans a blurred edge up to sigma ~8 px)
+
+    @classmethod
+    def texture_mask(cls, image, thr):
+        """(B, H, W) bool: pixels whose local contrast (standard deviation of the brightness, 0-1 scale, in a
+        MASK_WIN window) is at least thr."""
+        g = image.float().mean(1, keepdim=True)
+        k, p = cls.MASK_WIN, cls.MASK_WIN // 2
+        mu = F.avg_pool2d(g, k, 1, p, count_include_pad=False)
+        sd = torch.sqrt(torch.relu(F.avg_pool2d(g * g, k, 1, p, count_include_pad=False) - mu * mu))[:, 0]
+        return sd >= thr
+
     def loss(self, pred, batch):
         gt = batch["depth"].cuda(non_blocking=True)
         v = torch.isfinite(gt) & (gt > 0)
         loss = self.depth_weight * F.mse_loss(pred.float()[v], gt[v])
         if self.stage1_weight > 0:
+            if self.stage1_mask > 0:
+                v = v & self.texture_mask(batch["image"].cuda(non_blocking=True), self.stage1_mask)
+                if not v.any():   # no textured pixel in this batch
+                    return loss
             cam = batch["cam"].cuda(non_blocking=True).float()
             x = (cam[:, 2].view(-1, 1, 1) - gt).abs() / gt
             if self.stage1_space in ("sigma", "logsigma"):   # stage-1 output vs the blur model's blur (px)
@@ -394,6 +414,9 @@ def add_model_args(ap):
     ap.add_argument("--camind_dropout", type=float, default=0.0,
                     help="camind*: dropout of AENet's encoder blocks (0.2 in the original network and in runs "
                          "before this option; it makes eval mode differ from training, see CamindW)")
+    ap.add_argument("--stage1_mask", type=float, default=0.0,
+                    help="camind_corr*: stage-1 loss only on pixels with at least this local contrast "
+                         "(std of brightness 0-1 in 31 px; 0.02 keeps ~40%%; 0 = all pixels)")
     ap.add_argument("--depth_weight", type=float, default=1.0,
                     help="camind_corr*: weight of the depth loss (0: train stage 1 alone, a blur probe)")
 
@@ -401,7 +424,8 @@ def add_model_args(ap):
 def model_kwargs(name, a):
     if name in ("camind_corr", "camind_corr0"):
         return {"sigma0": a.sigma0, "blur_k": a.blur_k, "stage1_weight": a.stage1_weight, "x_scale": a.x_scale,
-                "stage1_space": a.stage1_space, "depth_weight": a.depth_weight, "dropout": a.camind_dropout}
+                "stage1_space": a.stage1_space, "depth_weight": a.depth_weight, "dropout": a.camind_dropout,
+                "stage1_mask": a.stage1_mask}
     if name == "camind":
         return {"dropout": a.camind_dropout}
     return {}

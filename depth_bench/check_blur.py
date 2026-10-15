@@ -6,7 +6,8 @@ On fixed crops of the fold's val views it compares
   - the stage-2 input (the model's |s - d| / d / x_scale) with the true value from depth and focus distance;
   - the stage-1 output (read as the blur sigma, px) with the blur the blur model gives for the true depth:
     sqrt(sigma0^2 + (C |s - d| / d)^2), C = k f^2 / (N (s - f))   (camind_corr0: sigma0 = 0).
-Reported overall, per F-number and per true-blur bin: Pearson and Spearman correlation, mean absolute
+Reported overall, per F-number and per true-blur bin, for all pixels and (blur only) for the textured
+pixels (local contrast at least --textured, as --stage1_mask in training): Pearson and Spearman correlation, mean absolute
 error, median ratio predicted / true. Also writes example maps (image, true and predicted |s - d| / d,
 true and predicted blur, depth).
 
@@ -53,6 +54,7 @@ def main(argv=None):
     ap.add_argument("--split", choices=["val", "train"], default="val")
     ap.add_argument("--train_images", type=int, default=0, help="with --split train: as for finetune")
     ap.add_argument("--stride", type=int, default=4, help="pixel subsampling for the statistics")
+    ap.add_argument("--textured", type=float, default=0.02, help="local-contrast threshold of textured pixels")
     models.add_model_args(ap)
     a = ap.parse_args(argv)
 
@@ -85,11 +87,12 @@ def main(argv=None):
             x_pred = model.last_mul[0].float().cpu().numpy()
             sig_pred = np.abs(model.last_blur[0].float().cpu().numpy())
             ok = np.isfinite(gt)
+            tex = model.texture_mask(b["image"], a.textured)[0].numpy()
             sub = np.zeros_like(ok)
             sub[::a.stride, ::a.stride] = True
             ok &= sub
             recs.append(pd.DataFrame({"F": N, "x_true": x_true[ok], "x_pred": x_pred[ok],
-                                      "sig_true": sig_true[ok], "sig_pred": sig_pred[ok]}))
+                                      "sig_true": sig_true[ok], "sig_pred": sig_pred[ok], "tex": tex[ok]}))
             if len(examples) < 6 and i % max(1, len(ds) // 6) == 0:
                 examples.append((b["image"][0].permute(1, 2, 0).numpy(), x_true, x_pred, sig_true, sig_pred, gt,
                                  pred[0].float().cpu().numpy(), N, C))
@@ -101,6 +104,8 @@ def main(argv=None):
             [(f"true sigma {iv.left:g}-{iv.right:g} px", g) for iv, g in df.groupby("sig_bin", observed=True)]:
         res.append({"group": name, "quantity": "|s-d|/d (stage-2 input)", **stats(g.x_pred.values, g.x_true.values)})
         res.append({"group": name, "quantity": "blur sigma (stage-1 output, px)", **stats(g.sig_pred.values, g.sig_true.values)})
+        t = g[g.tex]
+        res.append({"group": name, "quantity": "blur sigma, textured pixels", **stats(t.sig_pred.values, t.sig_true.values)})
     res = pd.DataFrame(res)
     res.to_csv(out / "summary.csv", index=False)
     pd.set_option("display.width", 200)
