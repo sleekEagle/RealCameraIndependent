@@ -276,6 +276,9 @@ class CamindW(BaseWrapper):
                             (a 10 px error costs 100x a 1 px error) dominate.
       stage1_space="logsigma": MSE(log(|stage-1 output| + LOG_EPS), log(true blur + LOG_EPS)): relative
                             errors, so the common small blurs (73% of edge pixels below 1.5 px) count.
+    Resized images (px_scale s < 1, the shrink factor, given per sample): blurs are in the image's own
+    pixels, so C becomes C s and the base blur sqrt((sigma0 s)^2 + RESAMPLE_PX^2) (area averaging adds
+    about the blur of a 1 px box). Native crops: s = 1.
     depth_weight=0 trains stage 1 alone (a probe: can the blur be read from the image at all?).
     stage1_mask=t (> 0): the stage-1 loss uses only pixels whose local contrast (texture_mask: standard
     deviation of the brightness, 0-1 scale, in a 31 px window) is at least t; 0.02 keeps ~40% of the
@@ -319,21 +322,33 @@ class CamindW(BaseWrapper):
         f = v * s / (v + s)   # cam holds the calibrated image distance v; thin lens 1/f = 1/v + 1/s
         return self.blur_k * f ** 2 / (N * (s - f))
 
-    def forward(self, image, K=None, cam=None):
+    def forward(self, image, K=None, cam=None, px_scale=None):
         H, W = image.shape[-2:]
         ph, pw = (-H) % 16, (-W) % 16           # 4 poolings
         x = F.pad(image, (0, pw, 0, ph), mode="reflect") if ph or pw else image
         B, _, Hp, Wp = x.shape
         if self.correction:
-            camparam = 1.0 / (self.blur_scale(cam.float()) * self.x_scale).view(B, 1, 1, 1)
+            C, s0 = self.pixel_terms(cam, px_scale)
+            camparam = 1.0 / (C * self.x_scale).view(B, 1, 1, 1)
             foc_dist = cam[:, 2].float().view(B, 1, 1, 1).expand(B, 1, Hp, Wp).to(x.dtype)
             depth, blur, mul = self.net(x, camind=True, camparam=camparam, foc_dist=foc_dist,
-                                        sigma0=self.sigma0 if self.sigma0 > 0 else None)
+                                        sigma0=s0.view(B, 1, 1, 1) if self.sigma0 > 0 else None)
         else:
             foc_dist = x.new_full((B, 1, Hp, Wp), self.FOC_CONST)
             depth, blur, mul = self.net(x, camind=False, camparam=None, foc_dist=foc_dist)
         self.last_blur, self.last_mul = blur[:, 0, :H, :W], mul[:, 0, :H, :W]
         return depth[:, 0, :H, :W]
+
+    RESAMPLE_PX = 0.29   # px, sigma of a 1 px box: blur added by area-averaging resizing
+
+    def pixel_terms(self, cam, px_scale):
+        """C (px per unit |s - d| / d) and the base blur (px) in the image's own pixels, shape (B,)."""
+        C = self.blur_scale(cam.float())
+        if px_scale is None:
+            return C, torch.full_like(C, self.sigma0)
+        sc = px_scale.to(C).view(-1)
+        s0 = torch.sqrt((self.sigma0 * sc) ** 2 + torch.where(sc < 1, self.RESAMPLE_PX ** 2, 0.0))
+        return C * sc, s0
 
     MASK_WIN = 31   # px, window of the local contrast (spans a blurred edge up to sigma ~8 px)
 
@@ -359,8 +374,9 @@ class CamindW(BaseWrapper):
             cam = batch["cam"].cuda(non_blocking=True).float()
             x = (cam[:, 2].view(-1, 1, 1) - gt).abs() / gt
             if self.stage1_space in ("sigma", "logsigma"):   # stage-1 output vs the blur model's blur (px)
-                C = self.blur_scale(cam).view(-1, 1, 1)
-                target = torch.sqrt(self.sigma0 ** 2 + (C * x) ** 2)
+                px = batch.get("px_scale")
+                C, s0 = self.pixel_terms(cam, px.cuda() if px is not None else None)
+                target = torch.sqrt(s0.view(-1, 1, 1) ** 2 + (C.view(-1, 1, 1) * x) ** 2)
                 pred = self.last_blur.float()
                 if self.stage1_space == "logsigma":
                     pred, target = torch.log(pred.abs() + self.LOG_EPS), torch.log(target + self.LOG_EPS)
@@ -380,7 +396,8 @@ def predict(model, batch):
     """Run a wrapper on a collated batch (passes the lens settings to models that need them)."""
     img, K = batch["image"].cuda(non_blocking=True), batch["K"].cuda(non_blocking=True)
     if getattr(model, "needs_camera", False):
-        return model(img, K, batch["cam"].cuda(non_blocking=True))
+        px = batch.get("px_scale")
+        return model(img, K, batch["cam"].cuda(non_blocking=True), px_scale=px.cuda() if px is not None else None)
     return model(img, K)
 
 

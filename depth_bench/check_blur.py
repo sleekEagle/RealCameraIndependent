@@ -55,10 +55,11 @@ def main(argv=None):
     ap.add_argument("--train_images", type=int, default=0, help="with --split train: as for finetune")
     ap.add_argument("--stride", type=int, default=4, help="pixel subsampling for the statistics")
     ap.add_argument("--textured", type=float, default=0.02, help="local-contrast threshold of textured pixels")
+    ap.add_argument("--resize", type=int, default=0, help="as for training: whole images at this short side")
     models.add_model_args(ap)
     a = ap.parse_args(argv)
 
-    run = f"{a.model}_{a.fold}" + (f"_{a.tag}" if a.tag else "")
+    run = f"{a.model}_{a.fold}" + (f"_r{a.resize}" if a.resize else "") + (f"_{a.tag}" if a.tag else "")
     ckpt = a.ckpt or str(RUNS_DIR / "finetune" / run / "last.pt")
     model = models.build(a.model, **models.model_kwargs(a.model, a)).cuda().eval()
     models.set_trainable(model, 0)
@@ -67,7 +68,7 @@ def main(argv=None):
     if a.split == "train":
         rows = data.subset(rows, a.train_images)
     rows = random.Random(0).sample(rows, min(a.images, len(rows)))
-    ds = data.EvalCrops(rows, 518, 2)
+    ds = data.ValResized(rows, a.resize) if a.resize else data.EvalCrops(rows, 518, 2)
     out = RUNS_DIR / "blur_check" / f"{run}_step{step}"
     out.mkdir(parents=True, exist_ok=True)
 
@@ -81,9 +82,9 @@ def main(argv=None):
             pred = models.predict(model, bb)
             gt = b["depth"][0].numpy()
             v_, N, s = (float(x) for x in b["cam"][0])
-            C = float(model.blur_scale(b["cam"])[0])
+            C, s0 = (float(t[0]) for t in model.pixel_terms(b["cam"], b.get("px_scale")))
             x_true = np.abs(s - gt) / gt / model.x_scale
-            sig_true = np.sqrt(model.sigma0 ** 2 + (C * np.abs(s - gt) / gt) ** 2)
+            sig_true = np.sqrt(s0 ** 2 + (C * np.abs(s - gt) / gt) ** 2)
             x_pred = model.last_mul[0].float().cpu().numpy()
             sig_pred = np.abs(model.last_blur[0].float().cpu().numpy())
             ok = np.isfinite(gt)

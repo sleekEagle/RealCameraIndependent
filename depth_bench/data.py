@@ -48,6 +48,15 @@ def subset(rows, n):
     return random.Random(0).sample(rows, n) if 0 < n < len(rows) else rows
 
 
+def label_blur(depth, row, blur_k, sigma0):
+    """Blur sigma (native px) that the blur model gives for the true depth:
+    sqrt(sigma0^2 + (C |s - d| / d)^2), C = k f^2 / (N (s - f)) (as models.CamindW.blur_scale)."""
+    v, N, s = (float(t) for t in camera(row))
+    f = v * s / (v + s)
+    C = blur_k * f ** 2 / (N * (s - f))
+    return np.sqrt(sigma0 ** 2 + (C * np.abs(s - depth) / depth) ** 2)
+
+
 def focus_table(path=FOCUS_CSV):
     """(scene, fl_mm, side) -> estimated focus distance in metres (def_calibration/focus_from_aperture_pairs.py).
     Empty if the file is missing."""
@@ -118,6 +127,7 @@ def crop_sample(img, depth, row, x0, y0, size, flip=False):
         "image": torch.from_numpy(np.ascontiguousarray(im)).permute(2, 0, 1).float() / 255.0,
         "depth": torch.from_numpy(np.ascontiguousarray(d)),
         "K": torch.from_numpy(intrinsics(row, x0, y0, size, flip)),
+        "px_scale": torch.tensor(1.0),
         "cam": camera(row),
     }
 
@@ -174,12 +184,16 @@ class TrainCrops(IterableDataset):
     """Endless stream of random native-resolution crops from the given rows.
 
     Each decoded image yields `crops_per_load` crops (decoding a 20 MP JPEG + depth TIFF takes
-    ~0.4 s); a shuffle buffer mixes crops from different images."""
+    ~0.4 s); a shuffle buffer mixes crops from different images.
+
+    wide_range=R > 0: keep only crops whose label blur spans a wide range, log2(p95 / p5) >= R (an
+    image with no such crop is skipped). Such crops show sharp and blurred regions side by side."""
 
     def __init__(self, rows, size=518, crops_per_load=4, min_valid=0.5, flip=True, jitter=0.1,
-                 buffer=64, seed=0):
+                 buffer=64, seed=0, wide_range=0.0, blur_k=36000.0, sigma0=0.8):
         self.rows, self.size, self.k, self.min_valid = rows, size, crops_per_load, min_valid
         self.flip, self.jitter, self.buffer, self.seed = flip, jitter, buffer, seed
+        self.wide_range, self.blur_k, self.sigma0 = wide_range, blur_k, sigma0
 
     def _crops(self, rng):
         while True:
@@ -187,11 +201,18 @@ class TrainCrops(IterableDataset):
             img, depth = load_pair(row)
             H, W = depth.shape
             valid = np.isfinite(depth)
+            if self.wide_range > 0:
+                lsig = np.log2(label_blur(depth[::8, ::8], row, self.blur_k, self.sigma0))
             got = 0
             for _ in range(self.k * 10):
                 x0, y0 = rng.randrange(W - self.size + 1), rng.randrange(H - self.size + 1)
                 if valid[y0:y0 + self.size, x0:x0 + self.size].mean() < self.min_valid:
                     continue
+                if self.wide_range > 0:
+                    w = lsig[y0 // 8:(y0 + self.size) // 8, x0 // 8:(x0 + self.size) // 8]
+                    w = w[np.isfinite(w)]
+                    if w.size < 100 or np.percentile(w, 95) - np.percentile(w, 5) < self.wide_range:
+                        continue
                 s = crop_sample(img, depth, row, x0, y0, self.size, flip=self.flip and rng.random() < 0.5)
                 if self.jitter:  # mild brightness / contrast jitter; no geometric scaling
                     a = 1 + rng.uniform(-self.jitter, self.jitter)
@@ -278,7 +299,8 @@ class TrainResized(IterableDataset):
                 b = rng.uniform(-self.jitter, self.jitter) / 2
                 image = (image * a + b).clamp(0, 1)
             yield {"image": image, "depth": torch.from_numpy(np.ascontiguousarray(d)),
-                   "K": torch.from_numpy(resize_intrinsics(row, s, flip, w)), "cam": camera(row)}
+                   "K": torch.from_numpy(resize_intrinsics(row, s, flip, w)), "cam": camera(row),
+                   "px_scale": torch.tensor(float(s))}
 
     def __iter__(self):
         wi = get_worker_info()
@@ -303,7 +325,8 @@ class ValResized(Dataset):
         row = self.rows[i]
         im, d, s = load_resized(row, self.short)
         return {"image": torch.from_numpy(np.ascontiguousarray(im)).permute(2, 0, 1).float() / 255.0,
-                "depth": torch.from_numpy(d), "K": torch.from_numpy(resize_intrinsics(row, s)), "cam": camera(row)}
+                "depth": torch.from_numpy(d), "K": torch.from_numpy(resize_intrinsics(row, s)), "cam": camera(row),
+                "px_scale": torch.tensor(float(s))}
 
 
 class EvalResized(Dataset):
@@ -322,7 +345,7 @@ class EvalResized(Dataset):
         im, _, s = load_resized(row, self.short, with_depth=False)
         depth = load_depth(row)   # full resolution, for scoring
         return {"image": torch.from_numpy(np.ascontiguousarray(im)).permute(2, 0, 1).float() / 255.0,
-                "K": torch.from_numpy(resize_intrinsics(row, s)), "cam": camera(row),
+                "K": torch.from_numpy(resize_intrinsics(row, s)), "cam": camera(row), "px_scale": torch.tensor(float(s)),
                 "depth_full": torch.from_numpy(depth), "row_index": i,
                 "positions": eval_crop_positions(row, depth, self.crop, self.n)}
 
@@ -331,7 +354,8 @@ def collate(batch):
     batch = [b for b in batch if b is not None]
     if not batch:
         return None
-    out = {k: torch.stack([b[k] for b in batch]) for k in ("image", "depth", "K", "cam")}
+    out = {k: torch.stack([b[k] for b in batch]) for k in ("image", "depth", "K", "cam", "px_scale")
+           if all(k in b for b in batch)}
     for k in batch[0]:
         if k not in out:
             out[k] = [b[k] for b in batch]

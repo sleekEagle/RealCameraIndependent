@@ -83,6 +83,10 @@ def main(argv=None):
     ap.add_argument("--train_images", type=int, default=0,
                     help="train on a fixed random subset of this many images (0 = all; e.g. an overfit test)")
     ap.add_argument("--clip", type=float, default=1.0, help="gradient-norm clipping (0 = off)")
+    ap.add_argument("--wide_range", type=float, default=0.0,
+                    help="native crops: for the first --wide_steps steps use only crops whose label blur spans "
+                         "log2(p95/p5) >= this (camera-corrected Camind; 0 = off)")
+    ap.add_argument("--wide_steps", type=int, default=0, help="steps with wide-range crops (-1 = all)")
     ap.add_argument("--seed", type=int, default=0)
     models.add_model_args(ap)
     a = ap.parse_args(argv)
@@ -121,7 +125,9 @@ def main(argv=None):
         train_ds = data.TrainResized(train_rows, a.resize, seed=a.seed + step)
         val_ds, val_bs = data.ValResized(val_rows, a.resize), 2
     else:
-        train_ds = data.TrainCrops(train_rows, a.crop, seed=a.seed + step)
+        wide = a.wide_range > 0 and (a.wide_steps < 0 or step < a.wide_steps)
+        train_ds = data.TrainCrops(train_rows, a.crop, seed=a.seed + step, wide_range=a.wide_range if wide else 0.0,
+                                   blur_k=a.blur_k, sigma0=a.sigma0)
         val_ds, val_bs = data.EvalCrops(val_rows, a.crop, a.val_crops), a.val_crops
     train_dl = DataLoader(train_ds, batch_size=a.batch, num_workers=a.workers, collate_fn=data.collate,
                           persistent_workers=a.workers > 0)
@@ -142,6 +148,11 @@ def main(argv=None):
     bad = 0  # optimizer steps in a row with a non-finite loss
     while step < steps:
         set_train_mode(model)
+        if not a.resize and a.wide_range > 0 and step == a.wide_steps:   # curriculum: back to all crops
+            print(f"step {step}: wide-range crops off", flush=True)
+            train_dl = DataLoader(data.TrainCrops(train_rows, a.crop, seed=a.seed + step), batch_size=a.batch,
+                                  num_workers=a.workers, collate_fn=data.collate, persistent_workers=a.workers > 0)
+            it = iter(train_dl)
         mult = (step + 1) / warm if step < warm else 0.5 * (1 + math.cos(math.pi * (step - warm) / max(1, steps - warm)))
         for g, lr in zip(opt.param_groups, base_lrs):
             g["lr"] = lr * mult
