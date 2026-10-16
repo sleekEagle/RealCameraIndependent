@@ -87,6 +87,8 @@ def main(argv=None):
                     help="native crops: for the first --wide_steps steps use only crops whose label blur spans "
                          "log2(p95/p5) >= this (camera-corrected Camind; 0 = off)")
     ap.add_argument("--wide_steps", type=int, default=0, help="steps with wide-range crops (-1 = all)")
+    ap.add_argument("--hold_scene", type=int, default=0,
+                    help="leave this scene out of training and validation (a control: is the scene memorized?)")
     ap.add_argument("--seed", type=int, default=0)
     models.add_model_args(ap)
     a = ap.parse_args(argv)
@@ -98,6 +100,8 @@ def main(argv=None):
     (run / "config.json").write_text(json.dumps(vars(a), indent=1))
 
     rows = data.read_manifest()
+    if a.hold_scene:
+        rows = [r for r in rows if int(r["scene"]) != a.hold_scene]
     train_rows = data.subset(data.select(rows, a.fold, ("train",)), a.train_images)
     val_rows = data.select(rows, a.fold, ("val",))
     val_rows = random.Random(0).sample(val_rows, min(a.val_images, len(val_rows)))

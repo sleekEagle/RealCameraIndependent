@@ -13,6 +13,8 @@ true and predicted blur, depth).
 
     python -m depth_bench.check_blur --model camind_corr --fold S1                 # uses last.pt
     python -m depth_bench.check_blur --model camind_corr --fold S1 --ckpt <path>/best.pt --images 120
+    python -m depth_bench.check_blur --model camind_corr --fold S2 --tag hold5 --resize 1036 --hold_scene 5
+        (leave-one-scene-out control: the fold's train and val images of scene 5, which training left out)
     python -m depth_bench.check_blur --model camind_corr --fold S1 --tag overfit --split train --train_images 20
         (overfit test: the same training images as finetune --train_images 20)
 Outputs in <RUNS_DIR>/blur_check/<run name>_step<step>/: summary.csv, examples.png
@@ -56,6 +58,9 @@ def main(argv=None):
     ap.add_argument("--stride", type=int, default=4, help="pixel subsampling for the statistics")
     ap.add_argument("--textured", type=float, default=0.02, help="local-contrast threshold of textured pixels")
     ap.add_argument("--resize", type=int, default=0, help="as for training: whole images at this short side")
+    ap.add_argument("--hold_scene", type=int, default=0,
+                    help="check only this scene (left out of training with finetune --hold_scene); "
+                         "uses its train and val images")
     models.add_model_args(ap)
     a = ap.parse_args(argv)
 
@@ -64,9 +69,13 @@ def main(argv=None):
     model = models.build(a.model, **models.model_kwargs(a.model, a)).cuda().eval()
     models.set_trainable(model, 0)
     step = load_trainable(model, ckpt).get("step", "?")
-    rows = data.select(data.read_manifest(), a.fold, (a.split,))
-    if a.split == "train":
-        rows = data.subset(rows, a.train_images)
+    if a.hold_scene:
+        rows = [r for r in data.select(data.read_manifest(), a.fold, ("train", "val"))
+                if int(r["scene"]) == a.hold_scene]
+    else:
+        rows = data.select(data.read_manifest(), a.fold, (a.split,))
+        if a.split == "train":
+            rows = data.subset(rows, a.train_images)
     rows = random.Random(0).sample(rows, min(a.images, len(rows)))
     ds = data.ValResized(rows, a.resize) if a.resize else data.EvalCrops(rows, 518, 2)
     out = RUNS_DIR / "blur_check" / f"{run}_step{step}"
@@ -110,7 +119,8 @@ def main(argv=None):
     res = pd.DataFrame(res)
     res.to_csv(out / "summary.csv", index=False)
     pd.set_option("display.width", 200)
-    print(f"{run}, checkpoint step {step}, {len(rows)} {a.split} images")
+    print(f"{run}, checkpoint step {step}, {len(rows)} " +
+          (f"images of held-out scene {a.hold_scene}" if a.hold_scene else f"{a.split} images"))
     print(res.round(3).to_string(index=False))
 
     fig, axs = plt.subplots(len(examples), 6, figsize=(18, 3 * len(examples)), squeeze=False)
