@@ -13,7 +13,7 @@ from other (val) views.
   C:    smooth maps but only 0.6-2.5 px (the size of most real blurs)
 
     python -m depth_bench.diagnostics.synth_blur --variant base --steps 3000
-Writes curve_<variant>.csv, bins_<variant>.csv, example_<variant>.png to --out.
+Writes curve_<variant>_s<seed>.csv, bins_<variant>_s<seed>.csv, example_<variant>_s<seed>.png to --out.
 """
 import argparse
 import math
@@ -84,12 +84,13 @@ def main(argv=None):
     ap.add_argument("--batch", type=int, default=8)
     ap.add_argument("--lr", type=float, default=1e-3)
     ap.add_argument("--fold", default="S2")
+    ap.add_argument("--seed", type=int, default=0, help="crops, blur maps and initial weights")
     ap.add_argument("--out")
     a = ap.parse_args(argv)
     out = out_dir("synth_blur", a.out)
-    V = a.variant
-    rng = random.Random(0)
-    torch.manual_seed(0)
+    V, tag = a.variant, f"{a.variant}_s{a.seed}"
+    rng = random.Random(a.seed)
+    torch.manual_seed(a.seed)
     man = data.read_manifest()
     TR = sharp_crops(rng.sample(data.select(man, a.fold, ("train",)), 80), 6, rng)
     TE = sharp_crops(rng.sample(data.select(man, a.fold, ("val",)), 20), 2, rng)
@@ -113,7 +114,7 @@ def main(argv=None):
         m.train()
         return torch.cat(P)[:, ::4, ::4], torch.cat(T)[:, ::4, ::4], torch.cat(X)[:, ::4, ::4]
 
-    gen = torch.Generator().manual_seed(0)
+    gen = torch.Generator().manual_seed(a.seed)
     curve, losses, t0 = [], [], time.time()
     for step in range(a.steps + 1):
         if step % 250 == 0:
@@ -133,7 +134,7 @@ def main(argv=None):
         torch.nn.utils.clip_grad_norm_(m.parameters(), 1.0)
         opt.step()
         losses.append(loss.item())
-    pd.DataFrame(curve).to_csv(out / f"curve_{V}.csv", index=False)
+    pd.DataFrame(curve).to_csv(out / f"curve_{tag}.csv", index=False)
 
     rows = []
     for lo, hi in zip(BINS[:-1], BINS[1:]):
@@ -144,7 +145,7 @@ def main(argv=None):
                          "pred_median": float(p[s].median()),
                          "pred_median_textured": float(p[st].median()) if st.sum() > 50 else np.nan})
     bins = pd.DataFrame(rows)
-    bins.to_csv(out / f"bins_{V}.csv", index=False)
+    bins.to_csv(out / f"bins_{tag}.csv", index=False)
     print(bins.round(2).to_string(index=False))
 
     img, true, sharp = test[0]
@@ -163,7 +164,7 @@ def main(argv=None):
             ax[k, j].set_title(title)
             ax[k, j].axis("off")
     fig.tight_layout()
-    fig.savefig(out / f"example_{V}.png", dpi=60)
+    fig.savefig(out / f"example_{tag}.png", dpi=60)
     print(f"-> {out}")
 
 

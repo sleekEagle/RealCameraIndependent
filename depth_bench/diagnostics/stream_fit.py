@@ -7,6 +7,7 @@ spread of the predicted crop medians. Step 0 is the untrained network (it alread
 Writes curve_<tag>.csv to --out.
 """
 import argparse
+import random
 
 import numpy as np
 import pandas as pd
@@ -23,11 +24,13 @@ def main(argv=None):
     ap.add_argument("--dropout", type=float, default=0.0)
     ap.add_argument("--jitter", type=float, default=0.0)
     ap.add_argument("--steps", type=int, default=800)
+    ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--out")
     a = ap.parse_args(argv)
     out = out_dir("stream_fit", a.out)
-    tag = f"lr{a.lr:g}_drop{a.dropout:g}_jit{a.jitter:g}"
-    torch.manual_seed(0)
+    tag = f"lr{a.lr:g}_drop{a.dropout:g}_jit{a.jitter:g}_s{a.seed}"
+    random.seed(a.seed)   # TrainCrops draws its stream seed from the global generator
+    torch.manual_seed(a.seed)
     rows = data.subset(data.select(data.read_manifest(), a.fold, ("train",)), 20)
     ev = data.collate([data.EvalCrops(rows, 518, 1)[i] for i in range(20)])
     it = iter(torch.utils.data.DataLoader(data.TrainCrops(rows, 518, seed=1, jitter=a.jitter), batch_size=4,

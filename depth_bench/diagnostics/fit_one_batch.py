@@ -4,10 +4,11 @@ own loop: AdamW lr 1e-3, no clipping.) Compared with the loss of the best single
 constant per crop, so a fit that only finds each crop's level is told apart from learning the blur map.
 
     python -m depth_bench.diagnostics.fit_one_batch --steps 2000
-Writes curve.csv (and baselines.csv) to --out.
+Writes curve_s<seed>.csv and baselines_s<seed>.csv to --out.
 """
 import argparse
 import itertools
+import random
 
 import numpy as np
 import pandas as pd
@@ -22,10 +23,12 @@ def main(argv=None):
     ap.add_argument("--fold", default="S1")
     ap.add_argument("--steps", type=int, default=2000)
     ap.add_argument("--lr", type=float, default=1e-3)
+    ap.add_argument("--seed", type=int, default=0, help="which crops form the batch, and the initial weights")
     ap.add_argument("--out")
     a = ap.parse_args(argv)
     out = out_dir("fit_one_batch", a.out)
-    torch.manual_seed(0)
+    random.seed(a.seed)   # TrainCrops draws its stream seed from the global generator
+    torch.manual_seed(a.seed)
     rows = data.subset(data.select(data.read_manifest(), a.fold, ("train",)), 20)
     batch = data.collate(list(itertools.islice(iter(data.TrainCrops(rows, 518, seed=0)), 4)))
     cam, gt = batch["cam"], batch["depth"]
@@ -34,14 +37,14 @@ def main(argv=None):
     t = torch.sqrt(m0.sigma0 ** 2 + (C * (s - gt).abs() / gt) ** 2)
     v = torch.isfinite(gt) & (gt > 0)
     lt = torch.log(t + m0.LOG_EPS)
-    base = {"best_single_constant": float(((lt[v] - lt[v].mean()) ** 2).mean()),
+    base = {"seed": a.seed, "best_single_constant": float(((lt[v] - lt[v].mean()) ** 2).mean()),
             "best_constant_per_crop": float(np.mean([((lt[k][v[k]] - lt[k][v[k]].mean()) ** 2).mean() for k in range(4)])),
             "F": str(cam[:, 1].tolist())}
-    pd.DataFrame([base]).to_csv(out / "baselines.csv", index=False)
+    pd.DataFrame([base]).to_csv(out / f"baselines_s{a.seed}.csv", index=False)
     print("log-loss baselines:", base)
     curve = []
     for prec, amp in (("fp32", False), ("bf16", True)):
-        torch.manual_seed(0)
+        torch.manual_seed(a.seed)
         m = models.build("camind_corr", stage1_space="logsigma", stage1_weight=1.0, depth_weight=0.0).cuda().train()
         opt = torch.optim.AdamW(m.parameters(), lr=a.lr, weight_decay=0.0)
         for i in range(a.steps + 1):
@@ -57,7 +60,7 @@ def main(argv=None):
             opt.zero_grad()
             loss.backward()
             opt.step()
-    pd.DataFrame(curve).to_csv(out / "curve.csv", index=False)
+    pd.DataFrame(curve).to_csv(out / f"curve_s{a.seed}.csv", index=False)
     print(f"-> {out}")
 
 
