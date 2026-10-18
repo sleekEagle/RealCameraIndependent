@@ -279,6 +279,10 @@ class CamindW(BaseWrapper):
     Resized images (px_scale s < 1, the shrink factor, given per sample): blurs are in the image's own
     pixels, so C becomes C s and the base blur sqrt((sigma0 s)^2 + RESAMPLE_PX^2) (area averaging adds
     about the blur of a 1 px box). Native crops: s = 1.
+    stage2_snr=True (camind_corr*): stage 2 also gets a constant channel log(C / sigma0) (both in the
+    image's own pixels): blur pixels per unit |s - d| / d relative to the base blur, i.e. how strongly
+    the blur reflects depth for this camera setting (high at F2.8, low at F22). It lets stage 2 learn how
+    far to trust the blur map.
     depth_weight=0 trains stage 1 alone (a probe: can the blur be read from the image at all?).
     stage1_mask=t (> 0): the stage-1 loss uses only pixels whose local contrast (texture_mask: standard
     deviation of the brightness, 0-1 scale, in a 31 px window) is at least t; 0.02 keeps ~40% of the
@@ -300,10 +304,12 @@ class CamindW(BaseWrapper):
                      # base-blur removal does not block the gradient at the start
 
     def __init__(self, num_filter=16, correction=False, sigma0=SIGMA0_PX, blur_k=BLUR_K, stage1_weight=10.0,
-                 x_scale=X_SCALE, stage1_space="x", depth_weight=1.0, dropout=0.0, stage1_mask=0.0):
+                 x_scale=X_SCALE, stage1_space="x", depth_weight=1.0, dropout=0.0, stage1_mask=0.0,
+                 stage2_snr=False):
         super().__init__()
         from .camind_net import AENet
-        self.net = AENet(3, 1, num_filter, flag_step2=True)
+        self.stage2_snr = stage2_snr and correction
+        self.net = AENet(3, 1, num_filter, flag_step2=True, step2_extra=1 if self.stage2_snr else 0)
         for m in self.net.modules():
             if isinstance(m, nn.Dropout):
                 m.p = dropout
@@ -331,8 +337,11 @@ class CamindW(BaseWrapper):
             C, s0 = self.pixel_terms(cam, px_scale)
             camparam = 1.0 / (C * self.x_scale).view(B, 1, 1, 1)
             foc_dist = cam[:, 2].float().view(B, 1, 1, 1).expand(B, 1, Hp, Wp).to(x.dtype)
+            snr = None
+            if self.stage2_snr:   # log(C / sigma0); floor 0.3 px for camind_corr0 (sigma0 = 0)
+                snr = torch.log(C / s0.clamp_min(0.3)).view(B, 1, 1, 1).expand(B, 1, Hp, Wp).to(x.dtype)
             depth, blur, mul = self.net(x, camind=True, camparam=camparam, foc_dist=foc_dist,
-                                        sigma0=s0.view(B, 1, 1, 1) if self.sigma0 > 0 else None)
+                                        sigma0=s0.view(B, 1, 1, 1) if self.sigma0 > 0 else None, extra2=snr)
         else:
             foc_dist = x.new_full((B, 1, Hp, Wp), self.FOC_CONST)
             depth, blur, mul = self.net(x, camind=False, camparam=None, foc_dist=foc_dist)
@@ -431,6 +440,8 @@ def add_model_args(ap):
     ap.add_argument("--camind_dropout", type=float, default=0.0,
                     help="camind*: dropout of AENet's encoder blocks (0.2 in the original network and in runs "
                          "before this option; it makes eval mode differ from training, see CamindW)")
+    ap.add_argument("--stage2_snr", action="store_true",
+                    help="camind_corr*: stage 2 also gets log(C / sigma0), how strongly blur reflects depth")
     ap.add_argument("--stage1_mask", type=float, default=0.0,
                     help="camind_corr*: stage-1 loss only on pixels with at least this local contrast "
                          "(std of brightness 0-1 in 31 px; 0.02 keeps ~40%%; 0 = all pixels)")
@@ -442,7 +453,7 @@ def model_kwargs(name, a):
     if name in ("camind_corr", "camind_corr0"):
         return {"sigma0": a.sigma0, "blur_k": a.blur_k, "stage1_weight": a.stage1_weight, "x_scale": a.x_scale,
                 "stage1_space": a.stage1_space, "depth_weight": a.depth_weight, "dropout": a.camind_dropout,
-                "stage1_mask": a.stage1_mask}
+                "stage1_mask": a.stage1_mask, "stage2_snr": a.stage2_snr}
     if name == "camind":
         return {"dropout": a.camind_dropout}
     return {}

@@ -1,8 +1,9 @@
 # Copied from github.com/sleekEagle/defocus_camind, source/arch/dofNet_arch4.py: the network of
 # "Camera-Independent Single Image Depth Estimation from Defocus Blur" (WACV 2024). Used through
-# depth_bench.models.CamindW, which adapts it to MODEST. One change (marked "depth_bench change"): an
+# depth_bench.models.CamindW, which adapts it to MODEST. Changes (marked "depth_bench change"): an
 # optional sigma0 argument; with camind=True, the base blur sigma0 is removed from the stage-1 output
-# before it is multiplied by camparam. sigma0=None (default) keeps the original behaviour.
+# before it is multiplied by camparam. sigma0=None (default) keeps the original behaviour. And an
+# optional extra stage-2 input channel (step2_extra=1, forward(extra2=...)); 0 (default) = original.
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
@@ -29,7 +30,7 @@ import torch.utils.data
 # static architecture
 class AENet(nn.Module):
 
-    def __init__(self,in_dim,out_dim, num_filter, n_blocks=3, flag_step2=False):
+    def __init__(self,in_dim,out_dim, num_filter, n_blocks=3, flag_step2=False, step2_extra=0):
         super(AENet, self).__init__()
         print('defNet_arch4')
         
@@ -63,7 +64,7 @@ class AENet(nn.Module):
         )
 
         if flag_step2:
-            self.conv_down2_0 = self.convsblocks(2, self.num_filter * 1, act_fnc)
+            self.conv_down2_0 = self.convsblocks(2 + step2_extra, self.num_filter * 1, act_fnc)   # depth_bench change
             self.pool2_0 = self.poolblock()
 
 
@@ -117,7 +118,7 @@ class AENet(nn.Module):
         return pool
 
 
-    def forward(self,x,inp=3,k=1,camind=True,flag_step2=True,camparam=0,foc_dist=0,sigma0=None):
+    def forward(self,x,inp=3,k=1,camind=True,flag_step2=True,camparam=0,foc_dist=0,sigma0=None,extra2=None):
         down1 = []
         pool_temp = []
         for j in range(self.n_blocks + 1):
@@ -198,6 +199,8 @@ class AENet(nn.Module):
                         pool_temp.pop(0)
                     else:
                         joint_pool =  torch.cat([mul[:, 1 * i:1 * (i + 1), :, :],foc_dist[:, 1 * i:1 * (i + 1), :, :]], dim=1)
+                        if extra2 is not None:   # depth_bench change: extra stage-2 input channel(s)
+                            joint_pool = torch.cat([joint_pool, extra2], dim=1)
                     conv = self.__getattr__('conv_down2_' + str(j + 0))(joint_pool)
                     down_temp.append(conv)
 
