@@ -141,7 +141,7 @@ def main(argv=None):
         for it in dl:
             if not it["positions"]:
                 continue
-            b = {k: it[k][None] for k in ("image", "K", "cam")}
+            b = {k: it[k][None] for k in ("image", "K", "cam", "px_scale")}   # px_scale: camind_corr* blur scale
             with torch.no_grad(), autocast_ctx():
                 pred = models.predict(model, b)
             full = it["depth_full"]
