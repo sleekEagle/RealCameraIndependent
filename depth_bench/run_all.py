@@ -120,7 +120,9 @@ def main(argv=None):
     margs = ["--sigma0", str(a.sigma0), "--blur_k", str(a.blur_k), "--stage1_weight", str(a.stage1_weight),
              "--x_scale", str(a.x_scale), "--stage1_space", a.stage1_space, "--depth_weight", str(a.depth_weight),
              "--camind_dropout", str(a.camind_dropout), "--stage1_mask", str(a.stage1_mask),
-             *(["--stage2_snr"] if a.stage2_snr else [])]
+             *(["--stage2_snr"] if a.stage2_snr else []), "--stage1_scales", a.stage1_scales,
+             *(["--sigma0_diffraction"] if a.sigma0_diffraction else []), *(["--motion_blur"] if a.motion_blur else []),
+             "--aperture_aug", str(a.aperture_aug), "--aperture_aug_max", str(a.aperture_aug_max)]
     if a.resize:
         ev += ["--resize", str(a.resize)]
         # resized focal lengths (646-1713 px) suit Metric3D's official canonical focal of 1000 px

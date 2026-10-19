@@ -163,6 +163,8 @@ def main(argv=None):
         opt.zero_grad(set_to_none=True)
         for _ in range(a.accum):
             b = next(it)
+            if hasattr(model, "augment"):   # camind_corr --aperture_aug (training only; no-op otherwise)
+                b = model.augment(b)
             with autocast_ctx():
                 pred = models.predict(model, b)
             if hasattr(model, "loss"):  # model's own loss (camind: depth MSE)

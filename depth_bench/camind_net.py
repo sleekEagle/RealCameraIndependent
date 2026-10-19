@@ -4,6 +4,8 @@
 # optional sigma0 argument; with camind=True, the base blur sigma0 is removed from the stage-1 output
 # before it is multiplied by camparam. sigma0=None (default) keeps the original behaviour. And an
 # optional extra stage-2 input channel (step2_extra=1, forward(extra2=...)); 0 (default) = original.
+# And forward(blur_fn=...): a function applied to the stage-1 output before the camera correction
+# (multi-scale blur reading); None (default) = original.
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
@@ -118,7 +120,8 @@ class AENet(nn.Module):
         return pool
 
 
-    def forward(self,x,inp=3,k=1,camind=True,flag_step2=True,camparam=0,foc_dist=0,sigma0=None,extra2=None):
+    def forward(self,x,inp=3,k=1,camind=True,flag_step2=True,camparam=0,foc_dist=0,sigma0=None,extra2=None,
+                blur_fn=None):
         down1 = []
         pool_temp = []
         for j in range(self.n_blocks + 1):
@@ -177,6 +180,8 @@ class AENet(nn.Module):
                         out_blur = out_col_blur
                     else:
                         out_blur = torch.cat([out_blur, out_col_blur], dim=1)
+        if blur_fn is not None:   # depth_bench change: e.g. combine with blur read at smaller scales
+            out_blur = blur_fn(out_blur)
         if(camind):
             if sigma0 is not None:
                 # depth_bench change: remove the base blur sigma0 (px) from the predicted blur before the

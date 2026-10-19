@@ -22,6 +22,7 @@ Models (and the HF / hub checkpoints they load):
 """
 import sys
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -283,6 +284,17 @@ class CamindW(BaseWrapper):
     image's own pixels): blur pixels per unit |s - d| / d relative to the base blur, i.e. how strongly
     the blur reflects depth for this camera setting (high at F2.8, low at F22). It lets stage 2 learn how
     far to trust the blur map.
+    Options for blur ranges / F-numbers not seen in training (all off by default):
+    stage1_scales=(1, 0.5, 0.25): stage 1 also reads the blur on the image shrunk by each factor; each
+      reading is converted back to this image's pixels (sqrt(sigma_s^2 - RESAMPLE^2) / s) and the readings
+      are averaged with weights that favour the scale where the blur is ~1.5 px (inside the trained range).
+      Each scale is supervised with its own label.
+    sigma0_diffraction: base blur sigma0(N)^2 = sigma_other^2 + (r * 0.42 lambda N / p)^2, with sigma_other
+      set so that F16 keeps sigma0 (diffraction grows with N; sigma0 was measured at F16).
+    motion_blur: adds the measured camera-motion blur per F-number (reports/scene_motion_blur.md) to sigma0.
+    aperture_aug=p: in training, a share p of the images is re-blurred to look like a wider aperture
+      (N / beta, beta up to aperture_aug_max): extra blur C |s - d| / d sqrt(beta^2 - 1) from the true depth,
+      and the image's F-number is set to N / beta.
     depth_weight=0 trains stage 1 alone (a probe: can the blur be read from the image at all?).
     stage1_mask=t (> 0): the stage-1 loss uses only pixels whose local contrast (texture_mask: standard
     deviation of the brightness, 0-1 scale, in a 31 px window) is at least t; 0.02 keeps ~40% of the
@@ -305,7 +317,8 @@ class CamindW(BaseWrapper):
 
     def __init__(self, num_filter=16, correction=False, sigma0=SIGMA0_PX, blur_k=BLUR_K, stage1_weight=10.0,
                  x_scale=X_SCALE, stage1_space="x", depth_weight=1.0, dropout=0.0, stage1_mask=0.0,
-                 stage2_snr=False):
+                 stage2_snr=False, stage1_scales=(1.0,), sigma0_diffraction=False, motion_blur=False,
+                 aperture_aug=0.0, aperture_aug_max=2.0):
         super().__init__()
         from .camind_net import AENet
         self.stage2_snr = stage2_snr and correction
@@ -317,6 +330,10 @@ class CamindW(BaseWrapper):
         self.stage1_weight = stage1_weight if correction else 0.0
         self.stage1_space, self.depth_weight, self.stage1_mask = stage1_space, depth_weight, stage1_mask
         self.needs_camera = correction
+        self.stage1_scales = tuple(float(s) for s in stage1_scales)
+        self.sigma0_diffraction, self.motion_blur = sigma0_diffraction, motion_blur
+        self.aperture_aug, self.aperture_aug_max = aperture_aug, aperture_aug_max
+        self.last_blur_scales = {}   # scale -> stage-1 output at that scale (its own pixels and size)
         if correction:
             nn.init.constant_(self.net.conv_out_blur[0].bias, self.INIT_BLUR)
         self.last_blur = None   # stage-1 output of the last forward pass
@@ -327,6 +344,85 @@ class CamindW(BaseWrapper):
         v, N, s = cam[:, 0], cam[:, 1], cam[:, 2]
         f = v * s / (v + s)   # cam holds the calibrated image distance v; thin lens 1/f = 1/v + 1/s
         return self.blur_k * f ** 2 / (N * (s - f))
+
+    # base blur vs F-number (rectified px of the native image): diffraction sigma = 0.42 lambda N, in raw px
+    # (pitch 6.54 um, lambda 0.55 um), times RECT (rectified / raw px, from sigma0 0.8 vs 0.62 raw px);
+    # motion: measured repeat-shot blur, rms of horizontal and vertical medians, noise level removed (raw px)
+    RECT = SIGMA0_PX / 0.62
+    DIFF_PX_PER_N = 0.42 * 0.55e-6 / 6.54e-6
+    MOTION_RAW = ((2.8, 0.0), (5.0, 0.12), (9.0, 0.34), (16.0, 0.49), (22.0, 0.41))
+    MS_CENTER, MS_OCTAVES = 1.5, 1.0   # multi-scale weights: centre (px) and width (octaves)
+
+    def sigma0_native(self, N):
+        """Base blur (rectified px of the native image) per sample, shape (B,)."""
+        s2 = torch.full_like(N, self.sigma0 ** 2)
+        if self.sigma0 <= 0:
+            return s2.sqrt()
+        if self.sigma0_diffraction:
+            d = lambda n: (self.RECT * self.DIFF_PX_PER_N * n) ** 2
+            s2 = (s2 - d(16.0)).clamp_min(0.01) + d(N)
+        if self.motion_blur:
+            xs = torch.tensor([float(np.log(n)) for n, _ in self.MOTION_RAW], device=N.device)
+            ys = torch.tensor([m for _, m in self.MOTION_RAW], device=N.device)
+            m = torch.from_numpy(np.interp(torch.log(N).cpu().numpy(), xs.cpu().numpy(), ys.cpu().numpy())).to(N)
+            s2 = s2 + (self.RECT * m) ** 2
+        return s2.sqrt()
+
+    def _multiscale_blur(self, image, H, W):
+        """Function for AENet.forward(blur_fn=...): combines the full-scale stage-1 output with readings on
+        smaller copies of the image (in this image's pixels)."""
+        def fn(out_blur):
+            sig = {1.0: out_blur.abs()}
+            self.last_blur_scales = {1.0: out_blur[:, 0, :H, :W]}
+            for s in self.stage1_scales:
+                if s == 1.0:
+                    continue
+                xs = F.interpolate(image, scale_factor=s, mode="area")
+                h, w = xs.shape[-2:]
+                xs = F.pad(xs, (0, (-w) % 16, 0, (-h) % 16), mode="reflect")
+                b_s, _ = self.net(xs, camind=False, flag_step2=False, foc_dist=0)
+                b_s = b_s[:, :, :h, :w]
+                self.last_blur_scales[s] = b_s[:, 0]
+                full = torch.sqrt(torch.relu(b_s.abs() ** 2 - self.RESAMPLE_PX ** 2) + 1e-4) / s
+                sig[s] = F.interpolate(full, size=out_blur.shape[-2:], mode="bilinear", align_corners=False)
+            num, den = 0, 0
+            for s, v in sig.items():
+                own = v * s   # blur in that scale's pixels
+                w = torch.exp(-0.5 * (torch.log2(own.clamp_min(0.05) / self.MS_CENTER) / self.MS_OCTAVES) ** 2)
+                num, den = num + w * v, den + w
+            return num / den.clamp_min(1e-6)
+        return fn
+
+    def augment(self, batch):
+        """Training only (aperture_aug > 0): re-blur a share of the images to look like a wider aperture."""
+        if not (self.training and self.correction and self.aperture_aug > 0):
+            return batch
+        from .diagnostics.common import gauss_blur
+        img = batch["image"].cuda(non_blocking=True).float()
+        gt = batch["depth"].cuda(non_blocking=True).float()
+        cam = batch["cam"].cuda(non_blocking=True).float().clone()
+        px = batch.get("px_scale")
+        px = px.cuda().float() if px is not None else None
+        B = img.shape[0]
+        beta = 1 + (self.aperture_aug_max - 1) * torch.rand(B, device=img.device)
+        beta = torch.where(torch.rand(B, device=img.device) < self.aperture_aug, beta, torch.ones_like(beta))
+        if (beta > 1).any():
+            C, _ = self.pixel_terms(cam, px)
+            d = torch.where(torch.isfinite(gt) & (gt > 0), gt, torch.nan)
+            fill = torch.nanmedian(d.flatten(1), dim=1).values.view(B, 1, 1)
+            d = torch.where(torch.isfinite(d), d, fill)
+            add = C.view(B, 1, 1) * (cam[:, 2].view(B, 1, 1) - d).abs() / d * torch.sqrt(beta ** 2 - 1).view(B, 1, 1)
+            levels = torch.cat([torch.zeros(1), torch.from_numpy(np.geomspace(0.3, 30.0, 16)).float()]).to(img.device)
+            stack = torch.stack([img] + [gauss_blur(img, float(s)) for s in levels[1:]])     # (L, B, 3, H, W)
+            pos = torch.bucketize(add.clamp(max=float(levels[-1])), levels).clamp(1, len(levels) - 1)
+            lo, hi = levels[pos - 1], levels[pos]
+            w = ((add.clamp(max=float(levels[-1])) - lo) / (hi - lo)).unsqueeze(1)
+            idx = lambda i: torch.gather(stack, 0, i.unsqueeze(0).unsqueeze(2).expand(1, B, 3, *img.shape[-2:]))[0]
+            img = (idx(pos - 1) * (1 - w) + idx(pos) * w).clamp(0, 1)
+            cam[:, 1] = cam[:, 1] / beta
+        out = dict(batch)
+        out.update(image=img, depth=gt, cam=cam)
+        return out
 
     def forward(self, image, K=None, cam=None, px_scale=None):
         H, W = image.shape[-2:]
@@ -340,8 +436,10 @@ class CamindW(BaseWrapper):
             snr = None
             if self.stage2_snr:   # log(C / sigma0); floor 0.3 px for camind_corr0 (sigma0 = 0)
                 snr = torch.log(C / s0.clamp_min(0.3)).view(B, 1, 1, 1).expand(B, 1, Hp, Wp).to(x.dtype)
+            blur_fn = self._multiscale_blur(image, H, W) if len(self.stage1_scales) > 1 else None
             depth, blur, mul = self.net(x, camind=True, camparam=camparam, foc_dist=foc_dist,
-                                        sigma0=s0.view(B, 1, 1, 1) if self.sigma0 > 0 else None, extra2=snr)
+                                        sigma0=s0.view(B, 1, 1, 1) if self.sigma0 > 0 else None, extra2=snr,
+                                        blur_fn=blur_fn)
         else:
             foc_dist = x.new_full((B, 1, Hp, Wp), self.FOC_CONST)
             depth, blur, mul = self.net(x, camind=False, camparam=None, foc_dist=foc_dist)
@@ -353,10 +451,11 @@ class CamindW(BaseWrapper):
     def pixel_terms(self, cam, px_scale):
         """C (px per unit |s - d| / d) and the base blur (px) in the image's own pixels, shape (B,)."""
         C = self.blur_scale(cam.float())
+        s0n = self.sigma0_native(cam[:, 1].float())
         if px_scale is None:
-            return C, torch.full_like(C, self.sigma0)
+            return C, s0n
         sc = px_scale.to(C).view(-1)
-        s0 = torch.sqrt((self.sigma0 * sc) ** 2 + torch.where(sc < 1, self.RESAMPLE_PX ** 2, 0.0))
+        s0 = torch.sqrt((s0n * sc) ** 2 + torch.where(sc < 1, self.RESAMPLE_PX ** 2, 0.0))
         return C * sc, s0
 
     MASK_WIN = 31   # px, window of the local contrast (spans a blurred edge up to sigma ~8 px)
@@ -386,10 +485,17 @@ class CamindW(BaseWrapper):
                 px = batch.get("px_scale")
                 C, s0 = self.pixel_terms(cam, px.cuda() if px is not None else None)
                 target = torch.sqrt(s0.view(-1, 1, 1) ** 2 + (C.view(-1, 1, 1) * x) ** 2)
-                pred = self.last_blur.float()
-                if self.stage1_space == "logsigma":
-                    pred, target = torch.log(pred.abs() + self.LOG_EPS), torch.log(target + self.LOG_EPS)
-                loss = loss + self.stage1_weight * F.mse_loss(pred[v], target[v])
+                preds = {1.0: (self.last_blur_scales.get(1.0, self.last_blur)).float()}
+                for s, b_s in self.last_blur_scales.items():   # multi-scale: each scale against its own label
+                    if s != 1.0:
+                        up = F.interpolate(b_s.float()[:, None], size=target.shape[-2:], mode="bilinear",
+                                           align_corners=False)[:, 0]
+                        preds[s] = (up, torch.sqrt((target * s) ** 2 + self.RESAMPLE_PX ** 2))
+                for s, p in preds.items():
+                    pred, tgt = (p, target) if s == 1.0 else p
+                    if self.stage1_space == "logsigma":
+                        pred, tgt = torch.log(pred.abs() + self.LOG_EPS), torch.log(tgt + self.LOG_EPS)
+                    loss = loss + self.stage1_weight * F.mse_loss(pred[v], tgt[v]) / len(preds)
             else:   # stage 1, after the correction, should give the scaled true |s - d| / d
                 loss = loss + self.stage1_weight * F.mse_loss(self.last_mul.float()[v], x[v] / self.x_scale)
         return loss
@@ -440,6 +546,15 @@ def add_model_args(ap):
     ap.add_argument("--camind_dropout", type=float, default=0.0,
                     help="camind*: dropout of AENet's encoder blocks (0.2 in the original network and in runs "
                          "before this option; it makes eval mode differ from training, see CamindW)")
+    ap.add_argument("--stage1_scales", default="1",
+                    help="camind_corr*: comma-separated image scales stage 1 reads the blur at, e.g. 1,0.5,0.25")
+    ap.add_argument("--sigma0_diffraction", action="store_true",
+                    help="camind_corr*: base blur grows with the F-number (diffraction); sigma0 is its F16 value")
+    ap.add_argument("--motion_blur", action="store_true",
+                    help="camind_corr*: add the measured camera-motion blur per F-number to the base blur")
+    ap.add_argument("--aperture_aug", type=float, default=0.0,
+                    help="camind_corr*: share of training images re-blurred to mimic a wider aperture (0 = off)")
+    ap.add_argument("--aperture_aug_max", type=float, default=2.0, help="largest aperture widening factor")
     ap.add_argument("--stage2_snr", action="store_true",
                     help="camind_corr*: stage 2 also gets log(C / sigma0), how strongly blur reflects depth")
     ap.add_argument("--stage1_mask", type=float, default=0.0,
@@ -453,7 +568,10 @@ def model_kwargs(name, a):
     if name in ("camind_corr", "camind_corr0"):
         return {"sigma0": a.sigma0, "blur_k": a.blur_k, "stage1_weight": a.stage1_weight, "x_scale": a.x_scale,
                 "stage1_space": a.stage1_space, "depth_weight": a.depth_weight, "dropout": a.camind_dropout,
-                "stage1_mask": a.stage1_mask, "stage2_snr": a.stage2_snr}
+                "stage1_mask": a.stage1_mask, "stage2_snr": a.stage2_snr,
+                "stage1_scales": tuple(float(x) for x in a.stage1_scales.split(",")),
+                "sigma0_diffraction": a.sigma0_diffraction, "motion_blur": a.motion_blur,
+                "aperture_aug": a.aperture_aug, "aperture_aug_max": a.aperture_aug_max}
     if name == "camind":
         return {"dropout": a.camind_dropout}
     return {}
