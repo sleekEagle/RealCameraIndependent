@@ -16,6 +16,7 @@ Why does the camera-corrected Camind's stage 1 not learn the blur on MODEST? The
 | `stream_fit` | Does stage 1 learn from random crops of 20 views? | yes |
 | `synth_blur` | Diagnostic only: synthetic blur, variants base / A (camera processing) / B (one blur per crop) / C (small blurs) | yes |
 | `probe_report` | Loss curves and per-bin plots of the pod probes (finetune logs, check_blur outputs) | no |
+| `report_figures` | All figures and tables of `reports/blur_learning.md` (needs a copy of the pod results) | no |
 
 The probes themselves are `depth_bench.finetune` runs of `camind_corr` with `--depth_weight 0`, checked
 with `depth_bench.check_blur` (see `reports/blur_learning.md` for the exact commands).
